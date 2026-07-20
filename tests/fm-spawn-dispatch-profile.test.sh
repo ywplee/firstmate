@@ -168,35 +168,37 @@ test_claude_config_dir_defaults_when_unset() {
   pass "claude launch defaults CLAUDE_CONFIG_DIR to \$HOME/.claude when the spawner has none"
 }
 
-# The tmux server environment can leak an account-selecting ANTHROPIC_BASE_URL/
-# ANTHROPIC_API_KEY into every pane, and an exported value overrides the config dir.
-# The launch must mirror the spawner: pass each var through when the spawner has it
-# (so a work-scoped or API-key spawner is preserved), and unset it otherwise (so the
-# inherited proxy cannot override the cascaded config dir). This case covers the
-# pass-through branch; the strip branch is the -u form asserted above.
-test_claude_cascades_spawner_anthropic_env() {
+# An exported ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY overrides the config dir, and the
+# spawning shell's reading of these two cannot be trusted: firstmate runs fm-spawn.sh
+# through a fresh non-interactive shell that re-sources the operator's rc files, which
+# can re-export a work-scoped ANTHROPIC_API_KEY the top-level agent never had. The
+# launch must therefore ALWAYS strip both, even when the spawning shell has them set,
+# so the cascaded config dir alone selects the account.
+test_claude_strips_anthropic_env_even_when_spawner_has_it() {
   local rec id out status launch
   id=profile-anthropic-z1d
   rec=$(make_spawn_case profile-anthropic claude "$id")
   read_case_record "$rec"
 
-  out=$( CLAUDE_CONFIG_DIR=/tmp/acct-work \
+  out=$( CLAUDE_CONFIG_DIR=/tmp/acct-personal \
     ANTHROPIC_BASE_URL='http://127.0.0.1:8787' \
     ANTHROPIC_API_KEY='sk-ant-test-DUMMY' \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" )
   status=$?
   expect_code 0 "$status" "claude spawn should succeed with a scoped anthropic proxy"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "env ANTHROPIC_BASE_URL='http://127.0.0.1:8787' ANTHROPIC_API_KEY='sk-ant-test-DUMMY' CLAUDE_CONFIG_DIR='/tmp/acct-work' " \
-    "claude launch did not pass the spawner's ANTHROPIC_* through"
-  assert_not_contains "$launch" "-u ANTHROPIC" "claude launch must not unset an ANTHROPIC_* var the spawner has set"
-  pass "claude launch passes the spawner's ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY through when set"
+  assert_contains "$launch" "env -u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR='/tmp/acct-personal' " \
+    "claude launch must strip ANTHROPIC_* even when the spawning shell has them set"
+  assert_not_contains "$launch" "sk-ant-test-DUMMY" "claude launch must not carry the spawner's ANTHROPIC_API_KEY value"
+  assert_not_contains "$launch" "127.0.0.1:8787" "claude launch must not carry the spawner's ANTHROPIC_BASE_URL value"
+  pass "claude launch unconditionally strips ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY when the spawner has them set"
 }
 
-# Mixed case: one ANTHROPIC_* var set, the other unset. `env` stops option
-# processing at the first NAME=VALUE operand, so every `-u` must precede any
-# assignment or the launch dies with `env: -u: No such file or directory`.
-test_claude_anthropic_env_mixed_orders_unset_before_assign() {
+# The strip is unconditional regardless of which of the two vars the spawning shell
+# happens to have set. Every -u precedes the CLAUDE_CONFIG_DIR assignment, so `env`
+# never stops option processing early (it would otherwise die with
+# `env: -u: No such file or directory`).
+test_claude_strips_anthropic_env_mixed_spawner_state() {
   local rec id out status launch
   id=profile-anthropic-mixed-z1e
   rec=$(make_spawn_case profile-anthropic-mixed claude "$id")
@@ -209,9 +211,10 @@ test_claude_anthropic_env_mixed_orders_unset_before_assign() {
   status=$?
   expect_code 0 "$status" "claude spawn should succeed with base-url set but api-key unset"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "env -u ANTHROPIC_API_KEY ANTHROPIC_BASE_URL='http://127.0.0.1:8787' CLAUDE_CONFIG_DIR='/tmp/acct-personal' " \
-    "claude launch must place -u before any NAME=VALUE assignment"
-  pass "claude launch orders env -u options before assignments in the mixed case"
+  assert_contains "$launch" "env -u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR='/tmp/acct-personal' " \
+    "claude launch must strip both ANTHROPIC_* vars with -u before any assignment"
+  assert_not_contains "$launch" "127.0.0.1:8787" "claude launch must not carry the spawner's ANTHROPIC_BASE_URL value"
+  pass "claude launch strips both ANTHROPIC_* vars regardless of which the spawner has set"
 }
 
 # The account cascade is claude-only: no other verified harness template carries it.
@@ -495,8 +498,8 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 test_no_profile_keeps_claude_launch_unchanged
 test_claude_cascades_spawner_config_dir
 test_claude_config_dir_defaults_when_unset
-test_claude_cascades_spawner_anthropic_env
-test_claude_anthropic_env_mixed_orders_unset_before_assign
+test_claude_strips_anthropic_env_even_when_spawner_has_it
+test_claude_strips_anthropic_env_mixed_spawner_state
 test_config_dir_prefix_is_claude_only
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
