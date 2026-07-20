@@ -1284,14 +1284,17 @@ sq_claude_config_dir=$(shell_quote "${CLAUDE_CONFIG_DIR:-$HOME/.claude}")
 # and unset it when the spawner does not, so an inherited account-selecting proxy
 # cannot override the cascaded config dir. Trailing space keeps it adjacent to the
 # CLAUDE_CONFIG_DIR arg in the template.
-claude_env_prefix=""
+claude_env_unset=""
+claude_env_assign=""
 for _acct_var in ANTHROPIC_BASE_URL ANTHROPIC_API_KEY; do
   if _acct_val=$(printenv "$_acct_var"); then
-    claude_env_prefix="${claude_env_prefix}$_acct_var=$(shell_quote "$_acct_val") "
+    claude_env_assign="${claude_env_assign}$_acct_var=$(shell_quote "$_acct_val") "
   else
-    claude_env_prefix="${claude_env_prefix}-u $_acct_var "
+    claude_env_unset="${claude_env_unset}-u $_acct_var "
   fi
 done
+claude_env_prefix="${claude_env_unset}${claude_env_assign}"
+unset _acct_var _acct_val
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}

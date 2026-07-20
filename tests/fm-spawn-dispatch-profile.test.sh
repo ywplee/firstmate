@@ -193,6 +193,27 @@ test_claude_cascades_spawner_anthropic_env() {
   pass "claude launch passes the spawner's ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY through when set"
 }
 
+# Mixed case: one ANTHROPIC_* var set, the other unset. `env` stops option
+# processing at the first NAME=VALUE operand, so every `-u` must precede any
+# assignment or the launch dies with `env: -u: No such file or directory`.
+test_claude_anthropic_env_mixed_orders_unset_before_assign() {
+  local rec id out status launch
+  id=profile-anthropic-mixed-z1e
+  rec=$(make_spawn_case profile-anthropic-mixed claude "$id")
+  read_case_record "$rec"
+
+  out=$( unset ANTHROPIC_API_KEY
+    CLAUDE_CONFIG_DIR=/tmp/acct-personal \
+    ANTHROPIC_BASE_URL='http://127.0.0.1:8787' \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" )
+  status=$?
+  expect_code 0 "$status" "claude spawn should succeed with base-url set but api-key unset"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "env -u ANTHROPIC_API_KEY ANTHROPIC_BASE_URL='http://127.0.0.1:8787' CLAUDE_CONFIG_DIR='/tmp/acct-personal' " \
+    "claude launch must place -u before any NAME=VALUE assignment"
+  pass "claude launch orders env -u options before assignments in the mixed case"
+}
+
 # The account cascade is claude-only: no other verified harness template carries it.
 test_config_dir_prefix_is_claude_only() {
   local rec id out status launch
@@ -475,6 +496,7 @@ test_no_profile_keeps_claude_launch_unchanged
 test_claude_cascades_spawner_config_dir
 test_claude_config_dir_defaults_when_unset
 test_claude_cascades_spawner_anthropic_env
+test_claude_anthropic_env_mixed_orders_unset_before_assign
 test_config_dir_prefix_is_claude_only
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
