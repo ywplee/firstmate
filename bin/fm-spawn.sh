@@ -419,16 +419,14 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    # The leading env prefix cascades the spawning firstmate's own account scope
-    # (which config dir/login/proxy, hence which billing account) to the launched
-    # agent, so a crewmate bills the same account the spawner does. It has two parts,
-    # both resolved at spawn time below (see the substitution block):
-    #   __CLAUDEENVPREFIX__ mirrors the spawner's ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY:
-    #     passes each through when the spawner has it, and unsets it otherwise. The
-    #     tmux server environment can leak an account-selecting proxy (e.g.
-    #     ANTHROPIC_BASE_URL) into every pane, and an exported value overrides the
-    #     config dir, so the stale inherited copy must be cleared for the config dir to
-    #     win.
+    # The leading env prefix cascades the spawning firstmate's own account scope to the
+    # launched agent, so a crewmate bills the same account the spawner does. It has two
+    # parts, both resolved at spawn time below (see the substitution block):
+    #   __CLAUDEENVPREFIX__ always unsets ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY: an
+    #     exported value of either overrides the config dir, and they cannot be read
+    #     reliably from the spawning shell (a fresh non-interactive shell can re-export
+    #     a work-scoped key from the operator's rc files), so account selection relies
+    #     solely on the config dir below.
     #   CLAUDE_CONFIG_DIR selects the config dir (hence login). A cwd-scoped selector
     #     (e.g. a direnv rule) never fires inside the disposable worktree, so without
     #     this the agent reverts to the default ~/.claude.
@@ -1272,29 +1270,22 @@ sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 # Resolve the account scope to cascade to a launched claude agent (see the claude
-# launch template). Both parts are THIS firstmate's own environment captured now, so
-# they must be expanded here, not left as literals that would re-resolve (to nothing,
-# or to the tmux server's stale copy) inside the fresh worktree pane. No-op for
-# non-claude templates.
-# Config dir: default to claude's own ~/.claude when unset, leaving any home not using
-# a config-dir convention unchanged.
+# launch template). No-op for non-claude templates.
+# Config dir: this firstmate's own CLAUDE_CONFIG_DIR captured now (expanded here, not
+# left as a literal that would re-resolve to nothing inside the fresh worktree pane),
+# defaulting to claude's own ~/.claude when unset so a home not using a config-dir
+# convention is left unchanged.
 sq_claude_config_dir=$(shell_quote "${CLAUDE_CONFIG_DIR:-$HOME/.claude}")
-# Anthropic account env: mirror the spawner exactly - pass each var through when the
-# spawner has it (overriding any stale value the pane inherited from the tmux server),
-# and unset it when the spawner does not, so an inherited account-selecting proxy
-# cannot override the cascaded config dir. Trailing space keeps it adjacent to the
+# Anthropic account env: always strip ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY so the
+# cascaded config dir alone selects the account. These two are deliberately NOT read
+# from the spawning shell: firstmate runs fm-spawn.sh through a fresh non-interactive
+# shell that re-sources the operator's rc files, which can re-export a work-scoped
+# ANTHROPIC_API_KEY the top-level agent process never had - noise indistinguishable
+# from a real setting. Unconditionally unsetting both ignores that noise and lets the
+# config dir win. Every -u precedes the CLAUDE_CONFIG_DIR assignment, so `env` never
+# stops option processing early. Trailing space keeps the prefix adjacent to the
 # CLAUDE_CONFIG_DIR arg in the template.
-claude_env_unset=""
-claude_env_assign=""
-for _acct_var in ANTHROPIC_BASE_URL ANTHROPIC_API_KEY; do
-  if _acct_val=$(printenv "$_acct_var"); then
-    claude_env_assign="${claude_env_assign}$_acct_var=$(shell_quote "$_acct_val") "
-  else
-    claude_env_unset="${claude_env_unset}-u $_acct_var "
-  fi
-done
-claude_env_prefix="${claude_env_unset}${claude_env_assign}"
-unset _acct_var _acct_val
+claude_env_prefix='-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY '
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
