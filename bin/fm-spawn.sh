@@ -419,12 +419,21 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    # CLAUDE_CONFIG_DIR=__CLAUDECONFIGDIR__ cascades the spawning firstmate's own
-    # account scope (which config dir, hence which login) to the launched agent. A
-    # cwd-scoped selector (e.g. a direnv rule) never fires inside the disposable
-    # worktree, so without this the agent silently reverts to the default ~/.claude and
-    # can bill the wrong account; the value is resolved at spawn time below.
-    claude) printf '%s' 'CLAUDE_CONFIG_DIR=__CLAUDECONFIGDIR__ CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    # The leading env prefix cascades the spawning firstmate's own account scope
+    # (which config dir/login/proxy, hence which billing account) to the launched
+    # agent, so a crewmate bills the same account the spawner does. It has two parts,
+    # both resolved at spawn time below (see the substitution block):
+    #   __CLAUDEENVPREFIX__ mirrors the spawner's ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY:
+    #     passes each through when the spawner has it, and unsets it otherwise. The
+    #     tmux server environment can leak an account-selecting proxy (e.g.
+    #     ANTHROPIC_BASE_URL) into every pane, and an exported value overrides the
+    #     config dir, so the stale inherited copy must be cleared for the config dir to
+    #     win.
+    #   CLAUDE_CONFIG_DIR selects the config dir (hence login). A cwd-scoped selector
+    #     (e.g. a direnv rule) never fires inside the disposable worktree, so without
+    #     this the agent reverts to the default ~/.claude.
+    # Neither touches the captain's global config; both are per-launch overrides.
+    claude) printf '%s' 'env __CLAUDEENVPREFIX__CLAUDE_CONFIG_DIR=__CLAUDECONFIGDIR__ CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
@@ -1263,11 +1272,26 @@ sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 # Resolve the account scope to cascade to a launched claude agent (see the claude
-# launch template). The value is THIS firstmate's own CLAUDE_CONFIG_DIR captured now,
-# so it must be expanded here, not left as a literal that would re-resolve (to nothing)
-# inside the fresh worktree pane. Default to claude's own ~/.claude when unset, leaving
-# any home not using a config-dir convention unchanged. No-op for non-claude templates.
+# launch template). Both parts are THIS firstmate's own environment captured now, so
+# they must be expanded here, not left as literals that would re-resolve (to nothing,
+# or to the tmux server's stale copy) inside the fresh worktree pane. No-op for
+# non-claude templates.
+# Config dir: default to claude's own ~/.claude when unset, leaving any home not using
+# a config-dir convention unchanged.
 sq_claude_config_dir=$(shell_quote "${CLAUDE_CONFIG_DIR:-$HOME/.claude}")
+# Anthropic account env: mirror the spawner exactly - pass each var through when the
+# spawner has it (overriding any stale value the pane inherited from the tmux server),
+# and unset it when the spawner does not, so an inherited account-selecting proxy
+# cannot override the cascaded config dir. Trailing space keeps it adjacent to the
+# CLAUDE_CONFIG_DIR arg in the template.
+claude_env_prefix=""
+for _acct_var in ANTHROPIC_BASE_URL ANTHROPIC_API_KEY; do
+  if _acct_val=$(printenv "$_acct_var"); then
+    claude_env_prefix="${claude_env_prefix}$_acct_var=$(shell_quote "$_acct_val") "
+  else
+    claude_env_prefix="${claude_env_prefix}-u $_acct_var "
+  fi
+done
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -1277,6 +1301,7 @@ LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
+LAUNCH=${LAUNCH//__CLAUDEENVPREFIX__/$claude_env_prefix}
 LAUNCH=${LAUNCH//__CLAUDECONFIGDIR__/$sq_claude_config_dir}
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
