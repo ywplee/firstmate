@@ -111,16 +111,75 @@ test_no_profile_keeps_claude_launch_unchanged() {
   rec=$(make_spawn_case profile-off claude "$id")
   read_case_record "$rec"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(CLAUDE_CONFIG_DIR=/tmp/acct-personal \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "claude spawn without profile flags should succeed"
   assert_contains "$out" "spawned $id harness=claude" "spawn did not report claude"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
+  expected="CLAUDE_CONFIG_DIR='/tmp/acct-personal' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  pass "no --model/--effort records defaults and keeps the claude launch byte-identical"
+  pass "no --model/--effort records defaults and keeps the claude launch byte-identical (config-dir cascade aside)"
+}
+
+# The spawning firstmate's account scope (its CLAUDE_CONFIG_DIR, hence which login,
+# hence which billing account) must cascade to the launched claude agent. A
+# cwd-scoped selector never fires inside the disposable worktree, so without the
+# per-launch prefix the agent silently reverts to ~/.claude and can bill the wrong
+# account.
+test_claude_cascades_spawner_config_dir() {
+  local rec id out status launch
+  id=profile-cfgdir-z1a
+  rec=$(make_spawn_case profile-cfgdir claude "$id")
+  read_case_record "$rec"
+
+  out=$(CLAUDE_CONFIG_DIR="/tmp/acct with space" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn should succeed with a scoped config dir"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/tmp/acct with space' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude " \
+    "claude launch did not cascade the spawner's CLAUDE_CONFIG_DIR (space-safe) as a per-launch prefix"
+  pass "claude launch cascades the spawner's CLAUDE_CONFIG_DIR verbatim (space-safe)"
+}
+
+# With no config-dir convention in effect (CLAUDE_CONFIG_DIR unset), the prefix must
+# fall back to claude's own documented default so an unrelated home is unaffected.
+test_claude_config_dir_defaults_when_unset() {
+  local rec id out status launch fakehome
+  id=profile-cfgdir-default-z1b
+  rec=$(make_spawn_case profile-cfgdir-default claude "$id")
+  read_case_record "$rec"
+  fakehome="$CASE_DIR/spawner-nohome"
+  mkdir -p "$fakehome"
+
+  out=$( unset CLAUDE_CONFIG_DIR
+    HOME="$fakehome" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" )
+  status=$?
+  expect_code 0 "$status" "claude spawn should succeed with no scoped config dir"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$fakehome/.claude' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude " \
+    "claude launch did not default CLAUDE_CONFIG_DIR to \$HOME/.claude when unset"
+  pass "claude launch defaults CLAUDE_CONFIG_DIR to \$HOME/.claude when the spawner has none"
+}
+
+# The cascade prefix is claude-only: no other verified harness template carries it.
+test_config_dir_prefix_is_claude_only() {
+  local rec id out status launch
+  id=profile-cfgdir-codex-z1c
+  rec=$(make_spawn_case profile-cfgdir-codex codex "$id")
+  read_case_record "$rec"
+
+  out=$(CLAUDE_CONFIG_DIR=/tmp/acct-personal \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR" "codex launch must not carry the claude-only config-dir prefix"
+  pass "the CLAUDE_CONFIG_DIR cascade prefix is scoped to the claude template only"
 }
 
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
@@ -385,6 +444,9 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_no_profile_keeps_claude_launch_unchanged
+test_claude_cascades_spawner_config_dir
+test_claude_config_dir_defaults_when_unset
+test_config_dir_prefix_is_claude_only
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness

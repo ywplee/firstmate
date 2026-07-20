@@ -419,7 +419,12 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    # CLAUDE_CONFIG_DIR=__CLAUDECONFIGDIR__ cascades the spawning firstmate's own
+    # account scope (which config dir, hence which login) to the launched agent. A
+    # cwd-scoped selector (e.g. a direnv rule) never fires inside the disposable
+    # worktree, so without this the agent silently reverts to the default ~/.claude and
+    # can bill the wrong account; the value is resolved at spawn time below.
+    claude) printf '%s' 'CLAUDE_CONFIG_DIR=__CLAUDECONFIGDIR__ CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
@@ -1257,6 +1262,12 @@ sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
+# Resolve the account scope to cascade to a launched claude agent (see the claude
+# launch template). The value is THIS firstmate's own CLAUDE_CONFIG_DIR captured now,
+# so it must be expanded here, not left as a literal that would re-resolve (to nothing)
+# inside the fresh worktree pane. Default to claude's own ~/.claude when unset, leaving
+# any home not using a config-dir convention unchanged. No-op for non-claude templates.
+sq_claude_config_dir=$(shell_quote "${CLAUDE_CONFIG_DIR:-$HOME/.claude}")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -1266,6 +1277,7 @@ LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
+LAUNCH=${LAUNCH//__CLAUDECONFIGDIR__/$sq_claude_config_dir}
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
