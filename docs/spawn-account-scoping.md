@@ -5,18 +5,30 @@ An operator who selects an account per directory - for example a direnv rule tha
 When the default account routes through a billing or optimization proxy, that spends the wrong account.
 
 `bin/fm-spawn.sh` closes this gap for `claude` by cascading the spawning firstmate's own account resolution to the launched agent.
-The mechanism is owned by that script: the `claude` case in `launch_template()` carries a leading env prefix, and the substitution block resolves it from the spawner's live environment at spawn time.
+The mechanism is owned by that script: the `claude` case in `launch_template()` carries a leading env prefix, resolved in the substitution block at spawn time.
 It has two parts, both per-launch overrides that never touch the operator's global config:
 
-- `CLAUDE_CONFIG_DIR` - set to the spawner's own value, defaulting to claude's own `$HOME/.claude` when unset. Selects the config dir, hence the login.
-- `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` - mirrored from the spawner: each is passed through when the spawner has it set, and unset (`env -u`) when the spawner does not.
+- `CLAUDE_CONFIG_DIR` - set to the spawner's own value (captured from the spawner's environment and expanded at spawn time, not left as a literal a fresh worktree pane would re-resolve to nothing), defaulting to claude's own `$HOME/.claude` when unset. Selects the config dir, hence the login. This is the sole account selector.
+- `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` - always stripped with a static `-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY`, never read from any environment.
 
 The second part is required because an exported `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY` overrides whatever the config dir's `settings.json` resolves, and the tmux server environment can leak an account-selecting proxy into every pane it spawns.
-Setting `CLAUDE_CONFIG_DIR` alone is a no-op for account selection whenever such a var is inherited: the config dir loses to the inherited value.
-Mirroring the spawner makes the config dir authoritative for an operator whose own environment has no such var, and preserves a work-scoped or API-key spawner whose environment does.
-The value is expanded at spawn time, not left as a literal that a fresh worktree pane's shell would re-resolve to nothing (or to the tmux server's stale copy).
+Setting `CLAUDE_CONFIG_DIR` alone is a no-op for account selection whenever such a var is inherited: the config dir loses to the inherited value, so the stale copy must be cleared for the config dir to win.
+Since the operator's stated policy is subscription-only (no API key in use), stripping both unconditionally is correct and makes the config dir authoritative in every case.
+Because the prefix never reproduces a real key value on the command line, it also removes the `ps`-visibility exposure the earlier pass-through branch carried.
 
-Passing `ANTHROPIC_API_KEY` through on the command line (the pass-through branch) exposes it in `ps`, but only for a spawner that already exports it - the same value is already visible in the tmux server environment via `ps eww`, so there is no net-new exposure. The strip branch removes it entirely.
+## Why the earlier conditional pass-through was abandoned
+
+The first version of this fix (commits `a42f264`, `9b5a253`, `c7906ea`) did not strip unconditionally.
+It mirrored the spawner: pass each var through when the spawner's shell had it set, `-u` it when the spawner's shell did not.
+That reads the environment of whatever shell is executing `fm-spawn.sh` - and that reading is not trustworthy.
+
+When firstmate (or a secondmate) invokes `fm-spawn.sh` through Claude Code's Bash tool, that shell is a fresh, non-interactive `/bin/zsh -c '...'`.
+zsh unconditionally sources `~/.zshenv` on every invocation regardless of interactivity, and the operator's `~/.zshenv` unconditionally exports a work-scoped `ANTHROPIC_API_KEY`.
+Claude Code's Bash tool also replays a shell snapshot that restores variables present in the original top-level session (e.g. a correctly-personal-scoped `CLAUDE_CONFIG_DIR`), but that snapshot does not proactively clear a variable that was absent in the original session yet gets freshly re-injected by `~/.zshenv`'s own export in the nested shell.
+
+Net effect, reproduced live: even when the genuine top-level firstmate/secondmate process is clean (`ps eww` on it shows only `CLAUDE_CONFIG_DIR`, no `ANTHROPIC_API_KEY`), a plain `fm-spawn.sh ... ` run through that agent's own Bash tool sees `ANTHROPIC_API_KEY` as set - re-injected by the nested shell's own `~/.zshenv` - and the conditional pass-through cascaded the work key to the child, silently defeating the fix.
+The re-injected value is indistinguishable from a real setting, so no per-var read can be trusted.
+Stripping both unconditionally removes the dependency on reading those two vars from any shell, which is why the conditional design was dropped.
 
 ## Cross-harness compatibility
 
@@ -70,7 +82,7 @@ $ env -u ANTHROPIC_API_KEY -u ANTHROPIC_BASE_URL CLAUDE_CONFIG_DIR="$HOME/.claud
 }
 ```
 
-The exact prefix `fm-spawn.sh` emits for this spawner (`env -u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR='…'`) was confirmed to strip the vars and set the config dir even when both are exported in the pane:
+The exact prefix `fm-spawn.sh` emits (`env -u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR='…'`) was confirmed to strip the vars and set the config dir even when both are exported in the pane:
 
 ```
 $ export ANTHROPIC_BASE_URL='http://leak:8787' ANTHROPIC_API_KEY='sk-leaked-DUMMY'
@@ -78,7 +90,34 @@ $ env -u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR='/Users/yewon
 /Users/yewonlee/.claude-personal <unset> <unset>
 ```
 
-The launch-string half of the fix - that `fm-spawn.sh` emits this prefix with the spawner's config dir (space-safe), the `$HOME/.claude` default when unset, the `ANTHROPIC_*` pass-through branch when the spawner has them set, and only for the `claude` template - is pinned by `tests/fm-spawn-dispatch-profile.test.sh`.
+The launch-string half of the fix - that `fm-spawn.sh` emits the static `-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY` strip prefix and the spawner's config dir (space-safe, `$HOME/.claude` default when unset), carries neither `ANTHROPIC_*` value regardless of the spawner's shell state, and only for the `claude` template - is pinned by `tests/fm-spawn-dispatch-profile.test.sh`.
+
+### End-to-end verification of the unconditional strip
+
+Environment: 2026-07-20, claude 2.1.215 (Claude Code), tmux backend. This is the false-negative-resistant test: a plain, unwrapped `bin/fm-spawn.sh` run through the agent's own Bash tool (the exact nested-shell path that motivated the fix), inspected via `ps eww` on the real spawned process - not a `claude auth status` call inside the spawned agent, which suffers the identical nested-shell contamination and would mislead.
+
+The invoking Bash-tool shell was contaminated exactly as described above - `ANTHROPIC_API_KEY` re-injected by `~/.zshenv`, `CLAUDE_CONFIG_DIR` correctly personal:
+
+```
+$ echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:+<SET>} CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR"
+ANTHROPIC_API_KEY=<SET> CLAUDE_CONFIG_DIR=/Users/yewonlee/.claude-personal
+```
+
+A plain scout spawn (no `env -u` wrapper, no `direnv exec`) into an isolated scratch home launched a real claude, whose actual environment shows both `ANTHROPIC_*` vars stripped and only the personal config dir set:
+
+```
+$ FM_HOME="$SCRATCH" bin/fm-spawn.sh envtest-scout-z9 /Users/yewonlee/src/personal/firstmate claude --scout
+spawned envtest-scout-z9 harness=claude kind=scout ... worktree=/Users/yewonlee/.treehouse/firstmate-7bab20/5/firstmate
+
+$ ps eww -p <spawned-claude-pid> | tr ' ' '\n' | grep -E '^(ANTHROPIC_API_KEY|ANTHROPIC_BASE_URL|CLAUDE_CONFIG_DIR)='
+CLAUDE_CONFIG_DIR=/Users/yewonlee/.claude-personal
+# ANTHROPIC_API_KEY: ABSENT
+# ANTHROPIC_BASE_URL: ABSENT
+```
+
+Under the abandoned conditional pass-through, the same contaminated invoking shell would have emitted `ANTHROPIC_API_KEY='sk-…'` into the launch and the child would have carried the work key; the static strip makes the child clean regardless.
+
+Note (2026-07-20): tearing the test scout down with `treehouse return` triggered a treehouse pool-wide reconciliation that detached and reset every sibling pool worktree, including an unrelated active worktree, discarding its uncommitted edits. `treehouse return` (and therefore `bin/fm-teardown.sh`, which calls it) is not safe to run while any sibling pool worktree has unlanded work. This is a treehouse behavior, outside firstmate's own tracked scripts.
 
 ## Maintaining this file
 
