@@ -41,8 +41,20 @@ As of 2026-07-20, only `claude` needs the cascade in this fleet.
 - `pi` - not affected in this fleet. No directory-scoped credential convention in use.
 - `grok` - not affected in this fleet. Its config dir is already pinned explicitly per spawn (`GROK_HOME`), and no directory-scoped convention selects a grok account here.
 
-A related but separate leak: `~/src/personal/.envrc` also exports a personal `GH_TOKEN`, which likewise does not reach the worktree.
-That is out of scope here because crewmates use `gh-axi` with the fleet's own GitHub auth rather than an inherited `GH_TOKEN`.
+## GitHub identity cascade (GH_TOKEN)
+
+The same directory-scoped-selector gap applies to GitHub identity, and it is now fixed the same way.
+`~/src/personal/.envrc` exports a personal `GH_TOKEN` that, like `CLAUDE_CONFIG_DIR`, never reaches a `~/.treehouse/...` worktree outside the personal source tree.
+Without it, `gh` (used by `no-mistakes`/`gh pr create` and by `gh-axi`) falls back to its keyring default identity, which is currently the operator's work account (`ywplee-al`) with zero access to the operator's private personal repos - so a secondmate on a personal-only private repo (e.g. `haff-fun`) could not open a PR.
+
+`bin/fm-spawn.sh` closes this by carrying `GH_TOKEN` through the same `claude` launch env-prefix, alongside the Anthropic cascade above.
+Unlike `ANTHROPIC_*`, this is a **pass-through-when-set**, not an unconditional strip:
+
+- The operator's rc files do NOT export `GH_TOKEN` (`grep -n 'GH_TOKEN\|GITHUB_TOKEN' ~/.zshenv` returns nothing), so the nested-shell re-injection that made `ANTHROPIC_API_KEY` untrustworthy does not apply - a plain `${GH_TOKEN:-}` read from the spawner's own environment is reliable.
+- Cascading the spawner's real GitHub identity to the child is the whole point, so stripping it would defeat the fix; there is nothing here to protect against.
+- When the spawner has no `GH_TOKEN` (a firstmate instance not using this convention), the assignment is omitted entirely and `gh` falls back to its own default exactly as before.
+
+The `GH_TOKEN=...` assignment is appended after the `-u ANTHROPIC_*` options in the prefix so `env` never stops option processing early.
 
 ## Verification
 

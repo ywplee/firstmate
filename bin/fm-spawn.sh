@@ -430,7 +430,11 @@ launch_template() {
     #   CLAUDE_CONFIG_DIR selects the config dir (hence login). A cwd-scoped selector
     #     (e.g. a direnv rule) never fires inside the disposable worktree, so without
     #     this the agent reverts to the default ~/.claude.
-    # Neither touches the captain's global config; both are per-launch overrides.
+    #   __CLAUDEENVPREFIX__ also carries GH_TOKEN when the spawner has one, passing the
+    #     spawning firstmate's own GitHub identity through so gh reaches the target repo
+    #     from a worktree outside the personal source tree; it is omitted when unset (see
+    #     the substitution block). This one is pass-through, not stripped.
+    # None touch the captain's global config; all are per-launch overrides.
     claude) printf '%s' 'env __CLAUDEENVPREFIX__CLAUDE_CONFIG_DIR=__CLAUDECONFIGDIR__ CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
@@ -1286,6 +1290,20 @@ sq_claude_config_dir=$(shell_quote "${CLAUDE_CONFIG_DIR:-$HOME/.claude}")
 # stops option processing early. Trailing space keeps the prefix adjacent to the
 # CLAUDE_CONFIG_DIR arg in the template.
 claude_env_prefix='-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY '
+# GitHub identity: pass the spawner's own GH_TOKEN through to the launched agent when
+# it has one, so a crewmate/secondmate in a disposable worktree outside the operator's
+# personal source tree reaches gh with the same account firstmate does. A personal
+# GH_TOKEN is exported by a cwd-scoped selector (e.g. a direnv rule under ~/src/personal)
+# that never fires inside the ~/.treehouse worktree, so without this gh falls back to
+# its keyring default identity, which may have zero access to the target repo. Unlike
+# ANTHROPIC_*, this is a pass-through-when-set: the operator's rc files do NOT export
+# GH_TOKEN, so a plain read carries no re-exported noise, and cascading the spawner's
+# real identity is the whole point - stripping it would defeat the fix. When the spawner
+# has none, the assignment is omitted entirely so gh's own default is left unchanged.
+# The assignment follows the -u options so `env` never stops option processing early.
+if [ -n "${GH_TOKEN:-}" ]; then
+  claude_env_prefix="${claude_env_prefix}GH_TOKEN=$(shell_quote "$GH_TOKEN") "
+fi
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}

@@ -111,7 +111,7 @@ test_no_profile_keeps_claude_launch_unchanged() {
   rec=$(make_spawn_case profile-off claude "$id")
   read_case_record "$rec"
 
-  out=$( unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY
+  out=$( unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY GH_TOKEN
     CLAUDE_CONFIG_DIR=/tmp/acct-personal \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" )
   status=$?
@@ -180,7 +180,8 @@ test_claude_strips_anthropic_env_even_when_spawner_has_it() {
   rec=$(make_spawn_case profile-anthropic claude "$id")
   read_case_record "$rec"
 
-  out=$( CLAUDE_CONFIG_DIR=/tmp/acct-personal \
+  out=$( unset GH_TOKEN
+    CLAUDE_CONFIG_DIR=/tmp/acct-personal \
     ANTHROPIC_BASE_URL='http://127.0.0.1:8787' \
     ANTHROPIC_API_KEY='sk-ant-test-DUMMY' \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" )
@@ -204,7 +205,7 @@ test_claude_strips_anthropic_env_mixed_spawner_state() {
   rec=$(make_spawn_case profile-anthropic-mixed claude "$id")
   read_case_record "$rec"
 
-  out=$( unset ANTHROPIC_API_KEY
+  out=$( unset ANTHROPIC_API_KEY GH_TOKEN
     CLAUDE_CONFIG_DIR=/tmp/acct-personal \
     ANTHROPIC_BASE_URL='http://127.0.0.1:8787' \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" )
@@ -232,6 +233,69 @@ test_config_dir_prefix_is_claude_only() {
   assert_not_contains "$launch" "CLAUDE_CONFIG_DIR" "codex launch must not carry the claude-only config-dir prefix"
   assert_not_contains "$launch" "ANTHROPIC" "codex launch must not carry the claude-only anthropic env cascade"
   pass "the account cascade prefix is scoped to the claude template only"
+}
+
+# A cwd-scoped GH_TOKEN (e.g. from a direnv rule under the personal source tree) never
+# fires inside the disposable worktree, so gh would fall back to its keyring default
+# identity. Unlike ANTHROPIC_*, the operator's rc files do not re-export GH_TOKEN, so a
+# plain read of the spawner's own environment is reliable: the launch must pass it
+# through when set so the child reaches gh with the spawner's own GitHub identity. The
+# assignment must follow the -u ANTHROPIC_* options so env does not stop option
+# processing early.
+test_claude_passes_through_spawner_gh_token() {
+  local rec id out status launch
+  id=profile-ghtoken-z1f
+  rec=$(make_spawn_case profile-ghtoken claude "$id")
+  read_case_record "$rec"
+
+  out=$( unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY
+    CLAUDE_CONFIG_DIR=/tmp/acct-personal \
+    GH_TOKEN='gho_personalTESTtoken' \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" )
+  status=$?
+  expect_code 0 "$status" "claude spawn should succeed with a spawner GH_TOKEN set"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "env -u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY GH_TOKEN='gho_personalTESTtoken' CLAUDE_CONFIG_DIR='/tmp/acct-personal' " \
+    "claude launch must pass the spawner's GH_TOKEN through after the -u options and before the config dir"
+  pass "claude launch cascades the spawner's GH_TOKEN when set"
+}
+
+# When the spawner has no GH_TOKEN (a firstmate instance not using this convention),
+# the assignment is omitted entirely so gh falls back to its own default exactly as
+# before - the prefix stays the plain strip-and-config-dir shape with no GH_TOKEN.
+test_claude_omits_gh_token_when_spawner_has_none() {
+  local rec id out status launch
+  id=profile-noghtoken-z1g
+  rec=$(make_spawn_case profile-noghtoken claude "$id")
+  read_case_record "$rec"
+
+  out=$( unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY GH_TOKEN
+    CLAUDE_CONFIG_DIR=/tmp/acct-personal \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" )
+  status=$?
+  expect_code 0 "$status" "claude spawn should succeed with no spawner GH_TOKEN"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "env -u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR='/tmp/acct-personal' " \
+    "claude launch must omit GH_TOKEN entirely when the spawner has none"
+  assert_not_contains "$launch" "GH_TOKEN" "claude launch must not emit a GH_TOKEN assignment when the spawner has none"
+  pass "claude launch omits GH_TOKEN when the spawner has none"
+}
+
+# The GH_TOKEN cascade is claude-only, like the anthropic cascade: no other template
+# carries the launch-string assignment even when the spawner has a GH_TOKEN set.
+test_gh_token_prefix_is_claude_only() {
+  local rec id out status launch
+  id=profile-ghtoken-codex-z1h
+  rec=$(make_spawn_case profile-ghtoken-codex codex "$id")
+  read_case_record "$rec"
+
+  out=$( GH_TOKEN='gho_personalTESTtoken' \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" )
+  status=$?
+  expect_code 0 "$status" "codex spawn should succeed with a spawner GH_TOKEN set"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "GH_TOKEN" "codex launch must not carry the claude-only GH_TOKEN cascade"
+  pass "the GH_TOKEN cascade prefix is scoped to the claude template only"
 }
 
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
@@ -501,6 +565,9 @@ test_claude_config_dir_defaults_when_unset
 test_claude_strips_anthropic_env_even_when_spawner_has_it
 test_claude_strips_anthropic_env_mixed_spawner_state
 test_config_dir_prefix_is_claude_only
+test_claude_passes_through_spawner_gh_token
+test_claude_omits_gh_token_when_spawner_has_none
+test_gh_token_prefix_is_claude_only
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
