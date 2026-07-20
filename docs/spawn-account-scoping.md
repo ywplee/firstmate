@@ -56,6 +56,50 @@ Unlike `ANTHROPIC_*`, this is a **pass-through-when-set**, not an unconditional 
 
 The `GH_TOKEN=...` assignment is appended after the `-u ANTHROPIC_*` options in the prefix so `env` never stops option processing early.
 
+### GH_TOKEN verification
+
+Environment: 2026-07-20, claude 2.1.216 (Claude Code), gh 2.87.3, tmux backend, spawner worktree `/Users/yewonlee/.treehouse/firstmate-7bab20/4/firstmate` (outside `~/src/personal/`, so the direnv rule does not fire on its own).
+
+The two identities are distinct and unambiguous - the personal token maps to `ywplee`, the keyring default to the work account `ywplee-al`:
+
+```
+$ GH_TOKEN="$PERSONAL_TOKEN" gh api user --jq .login
+ywplee
+$ env -u GH_TOKEN gh api user --jq .login
+ywplee-al
+```
+
+A plain, unwrapped scout spawn through the fixed `bin/fm-spawn.sh`, with the spawner's own `GH_TOKEN` set to the personal token (as the top-level firstmate has it via direnv), launched a real claude whose actual process environment carries the token:
+
+```
+$ GH_TOKEN="$PERSONAL_TOKEN" CLAUDE_CONFIG_DIR="$HOME/.claude-personal" \
+    FM_HOME="$SCRATCH" FM_SPAWN_NO_GUARD=1 \
+    bin/fm-spawn.sh ghtoken-scout-v1 /Users/yewonlee/src/personal/firstmate claude --scout
+spawned ghtoken-scout-v1 harness=claude kind=scout ... worktree=/Users/yewonlee/.treehouse/firstmate-7bab20/5/firstmate
+
+$ ps eww -p <spawned-claude-pid> | tr ' ' '\n' | grep -E '^(GH_TOKEN|CLAUDE_CONFIG_DIR)='
+CLAUDE_CONFIG_DIR=/Users/yewonlee/.claude-personal
+GH_TOKEN=github_pat_11AA…  (personal token, present)
+```
+
+The scout, running inside that spawned worktree, resolved the actual GitHub identity - not just env presence - to the personal account:
+
+```
+$ gh api user --jq .login
+ywplee
+$ gh auth status
+github.com
+  ✓ Logged in to github.com account ywplee (GH_TOKEN)
+  - Active account: true
+  ...
+  ✓ Logged in to github.com account ywplee-al (keyring)
+  - Active account: false
+```
+
+Without the fix, the same spawn (the current unfixed spawner strips nothing but also passes nothing) leaves the child with no `GH_TOKEN`, so `gh` falls back to the keyring active account `ywplee-al` and cannot reach the operator's private personal repos.
+This is the exact live failure that blocked a PR on the personal-only private repo.
+The launch-string half of the fix - the `claude`-only `GH_TOKEN` pass-through-when-set (omitted when unset), placed after the `-u ANTHROPIC_*` options - is pinned by `tests/fm-spawn-dispatch-profile.test.sh`.
+
 ## Verification
 
 Environment: 2026-07-20, claude 2.1.215 (Claude Code), spawn worktree `/Users/yewonlee/.treehouse/firstmate-7bab20/4/firstmate` (cwd outside `~/src/personal/`, so the direnv rule does not fire; the spawning firstmate's own scope is `CLAUDE_CONFIG_DIR=$HOME/.claude-personal` with no `ANTHROPIC_*` in its environment).
