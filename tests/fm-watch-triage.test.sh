@@ -1022,6 +1022,66 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold() {
   pass "consecutive wedge escalations on the same pane accumulate and demand deep inspection at the threshold"
 }
 
+# --- past FM_WEDGE_FORCE_ACTION_COUNT, the wake mechanically switches verb ---
+# demand-deep-inspection is stronger instruction text on an unchanged "stale:"
+# wake, but instruction text alone still relies on the supervising agent
+# actually complying, and an observed incident had the same alarm re-absorbed
+# 95 times in a row over a long session. Past FM_WEDGE_FORCE_ACTION_COUNT
+# consecutive escalations on the SAME pane, the reason's own leading verb
+# switches from "stale:" to "blocked:" - a mechanical change to the wake text
+# itself, not more instruction text layered onto an unchanged "stale:" wake.
+
+test_wedge_escalation_forces_blocked_reason_after_force_action_threshold() {
+  local dir state fakebin out capture_file window key pane_hash sig pid n
+  dir=$(make_case wedge-force-action); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-wedged-force"
+  printf 'idle building output' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedged-force.meta"
+  printf 'working: still monitoring ci\n' > "$state/wedged-force.status"
+  sig=$(seen_sig "$state/wedged-force.status"); printf '%s' "$sig" > "$state/.seen-wedged-force_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle building output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  # Priming round: first sighting of this stale hash classifies and absorbs it
+  # (establishing .stale-$key and starting the wedge timer) without going
+  # through wedge_timer_check at all - mirrors the demand-deep-inspection test.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_FORCE_ACTION_COUNT=2 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited on the priming round (should absorb): $(cat "$out")"
+  fi
+  reap "$pid"
+
+  n=1
+  while [ "$n" -le 2 ]; do
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_FORCE_ACTION_COUNT=2 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 40 || fail "watcher did not escalate on force-action round $n: $(cat "$out")"
+    grep -F "escalation $n" "$out" >/dev/null || fail "round $n did not report escalation count $n: $(cat "$out")"
+    if [ "$n" -lt 2 ]; then
+      grep -q '^stale: ' "$out" || fail "round $n should still be a stale: wake below the force-action threshold: $(cat "$out")"
+      grep -q '^blocked: ' "$out" && fail "round $n forced a blocked: wake before the force-action threshold: $(cat "$out")"
+    else
+      grep -q '^blocked: ' "$out" || fail "round $n (force-action threshold) did not force a blocked: wake: $(cat "$out")"
+      grep -F "force-action threshold" "$out" >/dev/null || fail "round $n did not name the force-action threshold: $(cat "$out")"
+    fi
+    n=$((n + 1))
+  done
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 2 ] || fail "escalation counter did not persist across force-action rounds"
+  unset FM_FAKE_CREW_STATE
+  pass "consecutive wedge escalations past the force-action threshold switch the wake reason from stale: to blocked:"
+}
+
 test_wedge_escalation_resets_when_pane_becomes_active() {
   local dir state fakebin out capture_file window key pane_hash sig pid
   dir=$(make_case wedge-escalation-reset); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1287,6 +1347,7 @@ test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
+test_wedge_escalation_forces_blocked_reason_after_force_action_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced

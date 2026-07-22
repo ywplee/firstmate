@@ -295,15 +295,16 @@ trap 'handle_attached_signal INT 130' INT
 
 watch_output_has_wake() {
   local out=$1
-  grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$out" 2>/dev/null
+  grep -Eq '^(signal:|stale:|blocked:|check:|heartbeat($|:))' "$out" 2>/dev/null
 }
 
 watch_output_reason_type() {
   local out=$1 line
-  line=$(grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$out" 2>/dev/null | head -1 || true)
+  line=$(grep -E '^(signal:|stale:|blocked:|check:|heartbeat($|:))' "$out" 2>/dev/null | head -1 || true)
   case "$line" in
     signal:*) printf 'actionable-signal' ;;
     stale:*) printf 'actionable-stale' ;;
+    blocked:*) printf 'actionable-blocked' ;;
     check:*) printf 'actionable-check' ;;
     heartbeat*) printf 'actionable-heartbeat' ;;
     *) printf 'none' ;;
