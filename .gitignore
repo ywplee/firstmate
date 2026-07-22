@@ -8,6 +8,7 @@ data/
 __pycache__/
 *.pyc
 .env
+treehouse.toml
 config/crew-harness
 config/crew-dispatch.json
 config/secondmate-harness

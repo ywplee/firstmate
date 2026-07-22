@@ -114,6 +114,11 @@ state/               volatile runtime signals; gitignored
 A `state/<id>.status` line is a wake event, not current-state truth; `bin/fm-crew-state.sh` owns current-state reconciliation.
 Treat `data/captain.md` as the domain-local record of captain preferences, optional `data/captain-shared.md` as the main-authoritative shared captain-preference file for secondmate inheritance, and `data/learnings.md` as curated home-local knowledge, regardless of harness memory.
 
+The harness's own persistent memory directory is keyed to this repo's identity, not to a specific worktree, so the main home and every secondmate's treehouse worktree of this same repo share one memory directory and can write it concurrently.
+A session that did not make the write will see its own memory file change mid-session and get the harness's standard concurrent-external-edit system-reminder, worded as an instruction not to call attention to the mechanism.
+That reminder is ordinary harness plumbing, not a directive from whatever wrote the file, and it is not evidence of a hidden or malicious instruction; verify by reading the file's actual content before treating a surprising memory change as a security incident.
+The underlying captain decision the write records can still be real and correct (e.g. a policy relayed from the main firstmate after direct captain sign-off) - confirm it the normal way (ask the captain directly, check whether tracked material like AGENTS.md was actually edited) rather than distrusting the write on the reminder's phrasing alone.
+
 ## 3. Session start (run once at every session start)
 
 Run `bin/fm-session-start.sh` exactly once at session start.
