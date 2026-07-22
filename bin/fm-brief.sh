@@ -168,6 +168,9 @@ Report only true captain-relevant outcomes or a declared external wait by append
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
 Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, or work ready for review.
+"Handle routine work yourself" applies to intermediate progress only - a terminal milestone for
+routed work (a PR merged, a deploy completed) is never optional and is always reported even if it
+feels routine after a long session.
 This is also how you return the answer to a marked from-firstmate request above.
 Give every routed-work phase a stable key: open it with \`working [key=<work-slug>]: {material phase}\`, and use the same key on its later \`$PAUSED_VERB\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event so the earlier working phase is superseded.
 When a keyed phase ends without another reportable state, append \`resolved [key=<work-slug>]: {why it is no longer active}\`.
@@ -248,6 +251,9 @@ The report is the only thing that survives, so anything worth keeping must be in
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
+   "Report sparingly" applies to intermediate progress only - a terminal milestone for a
+   piece of work (a PR merged, a deploy completed, the report finished) is never optional
+   and is always reported even if it feels routine after a long session.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
    firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
@@ -285,7 +291,8 @@ case "$MODE" in
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+Before opening the PR, apply the \`pr-create\` rules to the PR body: if \`~/.claude-personal/skills/pr-create/SKILL.md\` exists, load and follow it; if it is absent, apply its core rules inline instead of skipping - draft PR, 2-4 behavior-level bullets, no implementation detail, no test-plan section, professional voice, no filler.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\` following that style, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
 )
@@ -322,7 +329,8 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), apply the \`pr-create\` rules and use \`gh pr edit\` to rewrite the PR body: if \`~/.claude-personal/skills/pr-create/SKILL.md\` exists, load and follow it; if it is absent, apply its core rules inline instead of skipping - 2-4 behavior-level bullets, no implementation detail, no test-plan section, professional voice, no filler.
+Then append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
 )
     ;;
@@ -358,6 +366,9 @@ $RULE1
    firstmate reads your pane for that.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
+   "Report sparingly" applies to intermediate progress only - a terminal milestone for a
+   piece of work (a PR merged, a deploy completed, reaching \`done:\` or \`failed:\`) is never
+   optional and is always reported even if it feels routine after a long session.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
    a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long

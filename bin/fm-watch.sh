@@ -30,7 +30,15 @@
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
-#                          resume. Unless afk is active.
+#                          resume. Instruction-only escalation still relies on the
+#                          supervising agent actually complying, and long-session
+#                          compliance degrades; at FM_WEDGE_FORCE_ACTION_COUNT
+#                          escalations (default 10x FM_WEDGE_DEMAND_INSPECT_COUNT)
+#                          the reason's own verb switches from "stale:" to
+#                          "blocked:" - a mechanical change to the wake text
+#                          itself, not more instruction text, so a skimming
+#                          re-absorb reads a different sentence than the routine
+#                          case. Unless afk is active.
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
@@ -277,6 +285,18 @@ wake() {
 # below).
 FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 
+# Hard mechanical cap past FM_WEDGE_DEMAND_INSPECT_COUNT: that marker is still just
+# stronger instruction text, and a supervising agent can keep re-absorbing it on the
+# run-step/pane state anyway, since compliance with instruction text degrades over a
+# long session (observed: 95 consecutive re-absorptions of the same demand-deep-inspection
+# alarm). At FM_WEDGE_FORCE_ACTION_COUNT escalations (default 10x
+# FM_WEDGE_DEMAND_INSPECT_COUNT), wedge_timer_check switches the reason's own leading
+# verb from "stale:" to "blocked:" - a mechanical change to the wake text itself,
+# using the vocabulary AGENTS.md section 8 already defines as unambiguous ("blocked:
+# means firstmate action is needed"), rather than yet more instruction text layered
+# onto an unchanged "stale:" wake a tired reader can pattern-match past.
+FM_WEDGE_FORCE_ACTION_COUNT=${FM_WEDGE_FORCE_ACTION_COUNT:-$((FM_WEDGE_DEMAND_INSPECT_COUNT * 10))}
+
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
@@ -301,6 +321,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
           reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+        fi
+        if [ "$n" -ge "$FM_WEDGE_FORCE_ACTION_COUNT" ]; then
+          reason="blocked: $win (idle ${age}s, possible wedge, escalation $n exceeded the force-action threshold - this is not a routine stale wake, act now: load stuck-crewmate-recovery)"
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"
