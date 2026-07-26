@@ -146,7 +146,11 @@ Do not hand off `local-only` items.
 
 ## Recovery
 
-For `kind=secondmate` meta with no window, treat the secondmate as a dead persistent direct report and respawn it with:
+A `kind=secondmate` meta with `stopped=1` is an INTENTIONALLY stopped ephemeral secondmate (`bin/fm-teardown.sh <id> --stop`), not a failure: its home, lease, backlog, and registry entry are intact and only the process was ended.
+Never resurrect it during recovery; it is revived on demand by a routed request through `bin/fm-route-secondmate.sh` (spawn-before-route), which clears the marker.
+A dead endpoint or a "no window" reading on a `stopped=1` meta is therefore expected and healthy.
+
+For a `kind=secondmate` meta with no `stopped=1` marker and no window, treat the secondmate as a dead persistent direct report and respawn it with:
 
 ```sh
 bin/fm-spawn.sh <id> --secondmate

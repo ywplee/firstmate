@@ -55,6 +55,11 @@
 #
 # Tunables (env):
 #   FM_PENDING_REPLY_GRACE_SECS   default 120
+#   FM_PENDING_REPLY_COLD_SPAWN   1|true|yes: the request is being delivered to a
+#                                 just-cold-spawned secondmate, so store the wider
+#                                 cold-spawn grace on the new expectation (set by
+#                                 the spawn-before-route path, bin/fm-route-secondmate.sh)
+#   FM_PENDING_REPLY_COLD_SPAWN_GRACE_SECS  default 600; floored at the warm grace
 #   FM_PENDING_REPLY_DIR_OVERRIDE override the pending-replies directory (tests)
 #   FM_PENDING_REPLY_SEND_HOOK    optional command template for recovery delivery
 #                                 (tests); receives task_id and full message as args
@@ -72,6 +77,7 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_CORR_RE='corr=[A-Fa-f0-9]{16}'
 FM_PENDING_REPLY_GRACE_DEFAULT=120
+FM_PENDING_REPLY_COLD_SPAWN_GRACE_DEFAULT=600
 
 fm_pending_reply_now() {
   if [ -n "${FM_PENDING_REPLY_NOW:-}" ]; then
@@ -87,6 +93,30 @@ fm_pending_reply_grace_secs() {
     ''|*[!0-9]*) g=$FM_PENDING_REPLY_GRACE_DEFAULT ;;
   esac
   printf '%s' "$g"
+}
+
+# A cold spawn reloads the whole secondmate context and its first turn takes
+# measurably longer than a warm read, so the warm grace would fire a spurious
+# recovery mid-warmup. This wider window is floored at the warm grace so it can
+# only ever widen, never shrink, the guard.
+fm_pending_reply_cold_spawn_grace_secs() {
+  local g=${FM_PENDING_REPLY_COLD_SPAWN_GRACE_SECS:-$FM_PENDING_REPLY_COLD_SPAWN_GRACE_DEFAULT} warm
+  case "$g" in
+    ''|*[!0-9]*) g=$FM_PENDING_REPLY_COLD_SPAWN_GRACE_DEFAULT ;;
+  esac
+  warm=$(fm_pending_reply_grace_secs)
+  [ "$g" -ge "$warm" ] || g=$warm
+  printf '%s' "$g"
+}
+
+# The grace to store on a NEW expectation. Widened (never disabled) when the
+# request is delivered to a just-cold-spawned secondmate: recovery still fires,
+# just after a window that accounts for the cold start.
+fm_pending_reply_effective_grace_secs() {
+  case "${FM_PENDING_REPLY_COLD_SPAWN:-}" in
+    1|true|yes) fm_pending_reply_cold_spawn_grace_secs ;;
+    *) fm_pending_reply_grace_secs ;;
+  esac
 }
 
 # Directory holding durable pending-reply records for <state-dir>.
@@ -267,7 +297,7 @@ resolved_via=
 wrong_home_hits=0
 wrong_home_sightings=
 wrong_home_scan_signature=
-grace_secs=$(fm_pending_reply_grace_secs)
+grace_secs=$(fm_pending_reply_effective_grace_secs)
 EOF
   chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$rec" || return 1

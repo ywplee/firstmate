@@ -1930,6 +1930,10 @@ test_bootstrap_respawns_before_config_reread() {
   head=$(git -C "$w/main" rev-parse HEAD)
   add_sm_worktree "$w" sm "$head"
   mkdir -p "$w/sm/config" "$w/sm/state"
+  # The liveness sweep is work-gated: it respawns a dead secondmate only when its
+  # domain has work. Give it an in-flight crewmate so this respawn-ordering test
+  # actually exercises the respawn path.
+  printf 'kind=ship\nwindow=firstmate:fm-child\n' > "$w/sm/state/child.meta"
   printf 'harness=codex\n' >> "$w/home/state/sm.meta"
   printf '%s' old > "$w/sm/config/crew-harness"
   printf '%s' codex > "$w/home/config/crew-harness"

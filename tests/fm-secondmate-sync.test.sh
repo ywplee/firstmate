@@ -614,6 +614,12 @@ test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn() {
     printf 'home=%s/sm-instr\n' "$w"
   } > "$meta"
 
+  # The work-gated liveness sweep respawns a dead secondmate only when its domain
+  # has work; give it an in-flight crewmate so the endpoint rotation under test
+  # actually runs (bin/fm-bootstrap.sh's secondmate_liveness_sweep).
+  mkdir -p "$w/sm-instr/state"
+  printf 'kind=ship\nwindow=firstmate:fm-child\n' > "$w/sm-instr/state/child.meta"
+
   spawn_stub="$w/spawn-stub.sh"
   cat > "$spawn_stub" <<SH
 #!/usr/bin/env bash

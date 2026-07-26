@@ -52,10 +52,21 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force]
+# --stop is the ephemeral-secondmate PROCESS-stop, entirely distinct from that
+# retirement: it ends the resident secondmate agent but keeps the home, the
+# treehouse lease, the backlog, and the registry entry byte-intact, so a later
+# routed request can bring the same secondmate back (bin/fm-route-secondmate.sh).
+# The task meta is kept too but not byte-intact: it gains a durable stopped=1
+# marker (and nothing else). It refuses while the domain still has work under way
+# (an in-flight crewmate, a queued/in-flight backlog item, or a routed request
+# awaiting a reply) and never removes durable state or forces anything.
+# Usage: fm-teardown.sh <task-id> [--force|--stop]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
+#   --stop (kind=secondmate only) ends the resident process and keeps every
+#   durable trace; it never removes a home, lease, backlog, or registry entry,
+#   and never combines with --force.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -111,7 +122,23 @@ if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   exit 2
 fi
 ID=$1
-FORCE=${2:-}
+# Parse EVERY option after the id (not just $2), reject anything unknown, and
+# refuse --force with --stop in either order. --stop is the ephemeral process-stop
+# and carries no discard authority; letting an unparsed extra arg through once
+# turned "sm1 --force --stop" into a full forced retirement, so this fails closed.
+FORCE=
+STOP=0
+for _arg in "${@:2}"; do
+  case "$_arg" in
+    --force) FORCE=--force ;;
+    --stop) STOP=1 ;;
+    *) echo "error: unknown teardown option '$_arg' (expected --force or --stop)" >&2; exit 2 ;;
+  esac
+done
+if [ "$STOP" = 1 ] && [ -n "$FORCE" ]; then
+  echo "error: --stop and --force cannot be combined; --stop never discards work or removes a home" >&2
+  exit 2
+fi
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1024,6 +1051,72 @@ remove_secondmate_registry_entry() {
   grep -vE "^- $id( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv "$tmp" "$SECONDMATE_REG"
 }
+
+# Process-stop (ephemeral secondmate): end the resident agent and keep every
+# durable trace. Handled up front, before any retirement/removal path, so it can
+# never fall through into home/lease/registry removal. Refuses while the domain
+# still has work under way - a quiesce signal, never a discard, never forced.
+if [ "$STOP" = 1 ]; then
+  [ "$KIND" = secondmate ] \
+    || { echo "error: --stop applies only to a secondmate (task $ID is kind=$KIND); use plain teardown" >&2; exit 2; }
+  [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  # shellcheck source=bin/fm-pending-reply-lib.sh
+  . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+  # shellcheck source=bin/fm-ff-lib.sh
+  . "$SCRIPT_DIR/fm-ff-lib.sh"
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  # Serialize the check-kill-mark against a concurrent route (spawn) on the same
+  # secondmate, so a route cannot bring the agent up between the quiesce check and
+  # the kill. Same lock name the router uses.
+  STOP_LOCK="$STATE/.secondmate-$ID.lifecycle.lock"
+  stop_lock_wait=0
+  until fm_lock_try_acquire "$STOP_LOCK"; do
+    stop_lock_wait=$((stop_lock_wait + 1))
+    [ "$stop_lock_wait" -lt 120 ] || {
+      echo "REFUSED: secondmate $ID is busy with a concurrent route/stop; try again shortly." >&2
+      exit 1
+    }
+    sleep 0.5
+  done
+  # The quiesce check and the endpoint kill must be inside the lock; the mv/kill
+  # never leave a partially-stopped state. Release on any exit from here.
+  trap 'fm_lock_release "$STOP_LOCK" 2>/dev/null || true' EXIT
+  if [ -d "$HOME_PATH/state" ]; then
+    for stop_child_meta in "$HOME_PATH"/state/*.meta; do
+      [ -e "$stop_child_meta" ] || continue
+      echo "REFUSED: secondmate $ID still has in-flight work in $HOME_PATH/state ($(basename "$stop_child_meta"))." >&2
+      echo "Stop only at a natural quiesce point; let that work finish rather than stranding it." >&2
+      exit 1
+    done
+  fi
+  if fm_pending_reply_task_has_open "$STATE" "$ID"; then
+    echo "REFUSED: secondmate $ID still has a routed request awaiting a reply." >&2
+    echo "Stop only once that reply has landed; stopping now would strand it." >&2
+    exit 1
+  fi
+  if fm_secondmate_domain_has_work "$STATE" "$ID" "$HOME_PATH"; then
+    echo "REFUSED: secondmate $ID still has queued or in-flight work in its backlog." >&2
+    echo "Stop only at a natural quiesce point; clear or route that work first." >&2
+    exit 1
+  fi
+  # End the resident agent endpoint only. Home, lease, backlog, registry, and
+  # every in-flight record are left byte-intact.
+  fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+  remove_grok_turnend_auth "$STATE" "$ID"
+  # Record a DURABLE stopped marker in the meta so the stopped state is not
+  # byte-identical to a crash: the session-start liveness sweep and the
+  # instruction-layer recovery path (AGENTS.md section 5, secondmate-provisioning)
+  # both leave a stopped=1 secondmate down, while a routed request
+  # (bin/fm-route-secondmate.sh) revives it. fm-spawn rewrites the meta wholesale
+  # on respawn, so the marker clears automatically when it comes back.
+  if ! grep -q '^stopped=1$' "$META" 2>/dev/null; then
+    printf 'stopped=1\n' >> "$META"
+  fi
+  echo "stopped secondmate $ID (home, lease, backlog, and registry entry preserved; endpoint $T ended)"
+  exit 0
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 

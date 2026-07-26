@@ -870,8 +870,36 @@ test_failed_send_discards_undelivered_expectation() {
   pass "failed transport discards undelivered expectation only"
 }
 
+test_cold_spawn_grace_widens_new_expectation() {
+  local home state corr rec warm cold
+  home=$(setup_parent cold-spawn-grace)
+  state="$home/state"
+  # Warm delivery stores the ordinary grace. Per-call env prefixes override the
+  # suite-wide FM_PENDING_REPLY_GRACE_SECS for just that create.
+  corr=$(FM_PENDING_REPLY_GRACE_SECS=120 fm_pending_reply_create "$home" "$state" hibit "warm request")
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  warm=$(fm_pending_reply_get "$rec" grace_secs)
+  [ "$warm" = 120 ] || fail "warm expectation should store the ordinary grace, got '$warm'"
+  # A cold-spawned delivery stores the widened grace so a spurious recovery does
+  # not fire while the freshly spawned secondmate is still warming up.
+  corr=$(FM_PENDING_REPLY_GRACE_SECS=120 FM_PENDING_REPLY_COLD_SPAWN=1 FM_PENDING_REPLY_COLD_SPAWN_GRACE_SECS=600 \
+    fm_pending_reply_create "$home" "$state" hibit2 "cold request")
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  cold=$(fm_pending_reply_get "$rec" grace_secs)
+  [ "$cold" = 600 ] || fail "cold-spawn expectation should store the widened grace, got '$cold'"
+  # The guard is only ever widened: a cold grace narrower than the warm window is
+  # floored at the warm grace, never disabled.
+  corr=$(FM_PENDING_REPLY_GRACE_SECS=300 FM_PENDING_REPLY_COLD_SPAWN=1 FM_PENDING_REPLY_COLD_SPAWN_GRACE_SECS=10 \
+    fm_pending_reply_create "$home" "$state" hibit3 "floored request")
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  cold=$(fm_pending_reply_get "$rec" grace_secs)
+  [ "$cold" = 300 ] || fail "cold grace must be floored at the warm grace, got '$cold'"
+  pass "cold-spawn delivery widens (never narrows) the pending-reply grace"
+}
+
 # --- run --------------------------------------------------------------------
 
+test_cold_spawn_grace_widens_new_expectation
 test_normal_correlated_reply_resolves_once
 test_completed_turn_no_report_triggers_one_recovery
 test_recovery_attempt_is_never_reinjected

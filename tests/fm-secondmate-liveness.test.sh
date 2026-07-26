@@ -21,11 +21,16 @@
 #     live -> alive, unknown -> unknown.
 #   - fm_backend_agent_alive routes to the right per-backend classifier and
 #     reports unknown for a backend with no verified classifier (never errors).
-#   - bin/fm-bootstrap.sh's secondmate_liveness_sweep respawns a confidently
-#     DEAD secondmate (killing the stale endpoint first, since the tmux
-#     adapter refuses to create a same-named window over a live one), keeps
-#     handled DEAD and ALIVE results silent, and never acts on an inconclusive
-#     (UNKNOWN) reading.
+#   - bin/fm-bootstrap.sh's secondmate_liveness_sweep is WORK-GATED (the
+#     ephemeral-secondmate model): it respawns a confidently DEAD secondmate only
+#     when its domain has work under way (an in-flight crewmate in the home, or a
+#     routed request still awaiting a reply), killing the stale endpoint first
+#     (the tmux adapter refuses to create a same-named window over a live one);
+#     it keeps handled DEAD and ALIVE results silent, and never acts on an
+#     inconclusive (UNKNOWN) reading.
+#   - An idle secondmate with NO work is a healthy STOPPED state: the sweep leaves
+#     it down and reports nothing (no probe, no respawn, no SECONDMATE_LIVENESS
+#     line), whatever its endpoint reads.
 #   - The sweep converges: once a secondmate reads alive, a later run never
 #     re-touches it (idempotent by construction, not by remembering what it
 #     already did).
@@ -272,6 +277,15 @@ add_sm_home() {
   } > "$w/home/state/$id.meta"
 }
 
+# give_sm_work <w> <id>: make the secondmate's domain have work under way, so the
+# work-gated sweep treats a dead endpoint as recoverable rather than a healthy
+# stopped state. Uses the cheapest signal - an in-flight crewmate meta in the
+# secondmate's own home/state (fm_secondmate_domain_has_work).
+give_sm_work() {
+  local w=$1 id=$2
+  printf 'kind=ship\nwindow=firstmate:fm-child\n' > "$w/$id/state/child.meta"
+}
+
 run_bootstrap() {  # <fakebin> <home> <pane-cmd> <call-log> [extra env...] -> stdout
   local fb=$1 home=$2 cmd=$3 log=$4; shift 4
   PATH="$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$home" \
@@ -283,6 +297,7 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   local w fb tmuxfb log out
   w=$(new_world sweep-dead)
   add_sm_home "$w" sm1 firstmate:fm-sm1
+  give_sm_work "$w" sm1
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
@@ -293,14 +308,73 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   assert_contains "$(cat "$log")" "kill-window -t firstmate:fm-sm1" \
     "the stale endpoint must be killed before respawn (tmux refuses a same-named window over a live one)"
   assert_contains "$(cat "$log")" "new-window" \
-    "a confirmed-dead secondmate should actually be relaunched"
-  pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
+    "a confirmed-dead secondmate with work should actually be relaunched"
+  pass "sweep: a confirmed-dead secondmate WITH WORK is killed and respawned"
+}
+
+test_sweep_leaves_idle_dead_secondmate_stopped() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-idle-dead)
+  # No give_sm_work: an idle secondmate (no in-flight crewmate, no pending reply)
+  # whose endpoint reads confidently dead is a healthy STOPPED state under the
+  # ephemeral model. The sweep must leave it down and print nothing.
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS:" \
+    "an idle stopped secondmate must never produce a liveness diagnostic"
+  [ ! -s "$log" ] || fail "an idle stopped secondmate must never be killed or respawned: $(cat "$log")"
+  pass "sweep: an idle (no-work) dead secondmate is left stopped, silently"
+}
+
+test_sweep_skips_cleanly_stopped_secondmate() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-stopped)
+  # A cleanly stopped secondmate (bin/fm-teardown.sh --stop) carries a durable
+  # stopped=1 marker in its meta. The sweep must skip it silently REGARDLESS of
+  # work or endpoint reading - the marker is what keeps it distinguishable from a
+  # crash and stops the feature from undoing itself. give_sm_work proves the
+  # marker overrides the work gate.
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  give_sm_work "$w" sm1
+  printf 'stopped=1\n' >> "$w/home/state/sm1.meta"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS:" \
+    "an intentionally stopped secondmate must produce no liveness diagnostic"
+  [ ! -s "$log" ] || fail "a stopped=1 secondmate must never be probed or respawned: $(cat "$log")"
+  pass "sweep: an intentionally stopped (stopped=1) secondmate is skipped silently, even with work"
+}
+
+test_sweep_respawns_dead_secondmate_with_pending_reply() {
+  local w fb tmuxfb log out prdir
+  w=$(new_world sweep-dead-pending)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  # Work signal via a routed request still awaiting a reply, with NO in-flight
+  # crewmate meta - exercises the pending-reply clause of the work gate.
+  prdir="$w/home/state/pending-replies"; mkdir -p "$prdir"
+  printf 'task_id=sm1\nphase=awaiting_report\n' > "$prdir/abcdef0123456789"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_contains "$(cat "$log")" "new-window" \
+    "a dead secondmate with a routed request awaiting reply should be respawned"
+  pass "sweep: a dead secondmate with an open pending reply is respawned (pending-reply work signal)"
 }
 
 test_sweep_leaves_alive_secondmate_untouched() {
   local w fb tmuxfb log out
   w=$(new_world sweep-alive)
   add_sm_home "$w" sm1 firstmate:fm-sm1
+  give_sm_work "$w" sm1
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
@@ -309,13 +383,14 @@ test_sweep_leaves_alive_secondmate_untouched() {
   assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: already-live" \
     "an already-live secondmate should be handled silently"
   [ ! -s "$log" ] || fail "an already-live secondmate must never be killed or respawned: $(cat "$log")"
-  pass "sweep: an already-live secondmate is left untouched (no kill, no respawn)"
+  pass "sweep: an already-live secondmate with work is left untouched (no kill, no respawn)"
 }
 
 test_sweep_never_acts_on_inconclusive_reading() {
   local w fb tmuxfb log out
   w=$(new_world sweep-unknown)
   add_sm_home "$w" sm1 firstmate:fm-sm1
+  give_sm_work "$w" sm1
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
@@ -333,6 +408,7 @@ test_sweep_never_acts_on_unverified_harness_dead_reading() {
   local w fb tmuxfb log out
   w=$(new_world sweep-unverified-harness)
   add_sm_home "$w" sm1 firstmate:fm-sm1 custom-agent
+  give_sm_work "$w" sm1
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
@@ -348,6 +424,7 @@ test_sweep_converges_no_retouch_once_alive() {
   local w fb tmuxfb log out1 out2
   w=$(new_world sweep-idempotent)
   add_sm_home "$w" sm1 firstmate:fm-sm1
+  give_sm_work "$w" sm1
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
@@ -405,6 +482,9 @@ test_tmux_agent_alive_classifies
 test_herdr_agent_alive_maps_pane_agent_state
 test_agent_alive_dispatcher_routes_and_falls_back
 test_sweep_respawns_confirmed_dead_secondmate
+test_sweep_leaves_idle_dead_secondmate_stopped
+test_sweep_skips_cleanly_stopped_secondmate
+test_sweep_respawns_dead_secondmate_with_pending_reply
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_never_acts_on_inconclusive_reading
 test_sweep_never_acts_on_unverified_harness_dead_reading

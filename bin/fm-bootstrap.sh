@@ -434,6 +434,22 @@ secondmate_liveness_sweep() {
   # A meta with no recorded window= at all is left to the existing "meta with
   # no window" recovery path (AGENTS.md section 5 / secondmate-provisioning);
   # there is no endpoint here for this probe to read.
+  # EPHEMERAL-SECONDMATE MODEL. Two independent reasons to leave a secondmate
+  # down, both silent:
+  #   - stopped=1 in the meta: an INTENTIONALLY stopped secondmate
+  #     (bin/fm-teardown.sh --stop). Never resurrected here; only an explicit
+  #     routed request revives it (bin/fm-route-secondmate.sh). This durable
+  #     marker is what keeps a stopped secondmate distinguishable from a crash,
+  #     so the instruction-layer recovery path does not resurrect it either
+  #     (AGENTS.md section 5, secondmate-provisioning).
+  #   - no work under way (fm_secondmate_domain_has_work false): a crashed but
+  #     idle secondmate is a healthy stopped state, left down.
+  # Only a secondmate with work under way (an in-flight crewmate it must
+  # supervise, a queued/in-flight backlog item, or a routed request still
+  # awaiting a reply) is probed and, on a confident dead reading, respawned - so
+  # a crash mid-work is still recovered exactly as before. Nothing here is
+  # reported unless a respawn is attempted and fails, or the probe is
+  # inconclusive for a work-bearing secondmate.
   # Naturally scoped to the primary: a secondmate's own state/ never holds
   # kind=secondmate metas (secondmates never spawn secondmates), so this
   # sweep is a silent no-op there, exactly like secondmate_sync above.
@@ -441,14 +457,20 @@ secondmate_liveness_sweep() {
   # MID-SESSION is a harder follow-on needing a periodic liveness beacon -
   # explicitly out of scope here.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target verdict out
+  # shellcheck source=bin/fm-pending-reply-lib.sh disable=SC1091
+  . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+  local meta id window harness backend target verdict out home
   SECONDMATE_RESPAWNED_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
     id=$(basename "$meta" .meta)
+    [ "$(fm_meta_get "$meta" stopped)" = 1 ] && continue
     window=$(fm_meta_get "$meta" window)
     [ -n "$window" ] || continue
+    home=$(fm_meta_get "$meta" home)
+    [ -n "$home" ] || home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home 2>/dev/null || true)
+    fm_secondmate_domain_has_work "$STATE" "$id" "$home" || continue
     harness=$(fm_meta_get "$meta" harness)
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
