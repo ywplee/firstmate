@@ -265,6 +265,33 @@ live_secondmate_meta_records() {
   done
 }
 
+# 0 if secondmate <id> (home <home>) has work in its domain, under the
+# ephemeral-secondmate model. Three durable signals, any of which counts:
+#   1. an in-flight crewmate meta in the home it must supervise;
+#   2. a queued or in-flight item in the home's OWN backlog (a `- [ ]` line in
+#      data/backlog.md) - routed work lives there and outlives both any single
+#      crewmate and the first ack of a request, so a crash between crewmates or
+#      after an early ack still reads as work rather than idle-and-strandable;
+#   3. a routed request in <parent-state> still awaiting a correlated reply.
+# The pending-reply clause needs fm-pending-reply-lib.sh sourced by the caller;
+# without it the check degrades to the crewmate and backlog signals.
+fm_secondmate_domain_has_work() {  # <parent-state> <id> <home>
+  local parent_state=$1 id=$2 home=$3 child_meta
+  if [ -n "$home" ] && [ -d "$home/state" ]; then
+    for child_meta in "$home"/state/*.meta; do
+      [ -e "$child_meta" ] && return 0
+    done
+  fi
+  if [ -n "$home" ] && [ -f "$home/data/backlog.md" ] \
+    && grep -qE '^[[:space:]]*- \[ \]' "$home/data/backlog.md"; then
+    return 0
+  fi
+  if type fm_pending_reply_task_has_open >/dev/null 2>&1; then
+    fm_pending_reply_task_has_open "$parent_state" "$id" && return 0
+  fi
+  return 1
+}
+
 # Fast-forward one target to a base. Prints its status line. Sets globals for the
 # caller:
 #   FF_STATUS = updated|current|skipped

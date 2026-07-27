@@ -138,7 +138,7 @@ A lock-refused session must not spawn, steer, merge, drain the wake queue, repai
 2. **Bootstrap** - detect-only checks (tool/version problems, GitHub auth, the worktree-tangle check, harness override, dispatch-profile validation, backlog-backend status) always run, but routine confirmations stay silent by default.
    When the lock could not be acquired, the worktree-tangle check uses read-only advisory wording without a checkout repair command.
    The five MUTATING sweeps - non-executing legacy PR-check migration, fleet sync, the local secondmate fast-forward sweep, the secondmate liveness sweep, and X-mode artifact writes - run only when this session actually holds the lock from step 1.
-   The secondmate liveness sweep deterministically guarantees every registered secondmate is actually running: it probes each live secondmate's endpoint for a real agent process (not just pane presence), respawns only on a confident dead reading, and reports only skipped or failed guarantees as `SECONDMATE_LIVENESS:` lines (`bin/fm-bootstrap.sh`; `bin/fm-backend.sh`'s `fm_backend_agent_alive`).
+   The secondmate liveness sweep keeps a secondmate running only while its domain has work (ephemeral-secondmate model): it leaves an intentionally stopped one (`stopped=1` in meta) and an idle one down and silent, and for a work-bearing secondmate probes the endpoint for a real agent process (not just pane presence), respawns only on a confident dead reading, and reports only skipped or failed guarantees as `SECONDMATE_LIVENESS:` lines (`bin/fm-bootstrap.sh`; `bin/fm-backend.sh`'s `fm_backend_agent_alive`).
 3. **Wake queue** - when locked, drains the durable wake queue and prints the raw records prominently as this turn's first work queue; a bounded, clearly labeled historical status-event annotation may follow a valid `signal` record but never replaces it or current-state reconciliation, and a lapsed watcher chain still surfaces here via the same guard alarm.
    When the lock could not be acquired, the queue is left untouched because another session owns it, and the guard's tangle/watcher-liveness alarms still print in read-only advisory mode without drain, supervision repair, or checkout repair commands.
 4. **Context digest** - the full contents of `data/projects.md`, `data/secondmates.md`, `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, each clearly delimited.
@@ -180,7 +180,7 @@ Treat digest status tails as wake-event history and use targeted current-state r
 
 Reconcile only this home's recorded direct reports and their recorded backend inventory; never sweep a shared endpoint namespace for matching names or claim another home's work.
 For an ordinary direct report whose endpoint is dead or metadata has no window, load `stuck-crewmate-recovery` and preserve the recorded worktree and unlanded work while reconciling ownership.
-For a dead secondmate direct report, load `secondmate-provisioning` and reconcile only that secondmate, never its whole child tree from the main home.
+For a dead secondmate direct report, load `secondmate-provisioning` and reconcile only that secondmate, never its whole child tree from the main home; a `stopped=1` secondmate is an intentionally stopped ephemeral one (healthy, revived on demand by a routed request), not a failure to recover.
 Each secondmate reconciles work already in its own home and then idles; recovery never authorizes it to invent work.
 
 If away mode is present, load `/afk` and let its daemon own supervision rather than arming another cycle.
@@ -251,6 +251,8 @@ After spawning, confirm the worker is processing the brief, handle any trust dia
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
 
 Steer a worker with short single-line messages through fail-closed `fm-send`; put long instructions in a file.
+A secondmate's resident process is ephemeral: it runs only while its domain has work, so route work to a secondmate through `bin/fm-route-secondmate.sh`, which spawns a stopped one back and verifies it is live before delivering, rather than sending to a possibly-stopped endpoint with `fm-send` directly.
+Stop an idle secondmate at a quiesce point with `bin/fm-teardown.sh <id> --stop`, which ends only the process and keeps the home, lease, backlog, and registry entry - distinct from retirement (`fm-teardown.sh <id>`), which removes the home and route; the startup liveness sweep leaves a stopped secondmate down and silent.
 A secondmate's routed reply returns through status or a document pointer, not by firstmate peeking into its chat.
 For the parent-owned correlation, recovery, and escalation contract on marked secondmate requests, see `bin/fm-pending-reply-lib.sh`.
 Supervise all live work under section 8.
