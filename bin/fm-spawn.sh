@@ -1119,7 +1119,14 @@ exclude_path() {
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
+# Slot-identity marker: names the task currently occupying this worktree. A pooled
+# treehouse slot is recycled between tasks, so the recorded worktree= path alone
+# cannot tell fm-teardown.sh whether a stale record still owns the path it names.
+# Overwritten by whichever task holds the slot next, and removed at teardown, so it
+# always names the current occupant rather than a former one.
 if [ "$KIND" != secondmate ]; then
+  printf '%s\n' "$ID" > "$WT/.fm-task-id"
+  exclude_path '.fm-task-id'
   case "$HARNESS" in
     claude*)
       mkdir -p "$WT/.claude"

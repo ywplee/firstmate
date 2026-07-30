@@ -5,6 +5,7 @@ data/
 .lavish/
 .claude/settings.local.json
 .fm-secondmate-home
+.fm-task-id
 .DS_Store
 __pycache__/
 *.pyc
