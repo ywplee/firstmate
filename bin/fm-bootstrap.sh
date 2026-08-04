@@ -12,6 +12,8 @@
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
+#                 "ORPHANED_RECORD: task <id> records worktree <path>, which now
+#                 belongs to task <other-id>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -149,6 +151,29 @@ fleet_sync_relay_all_output() {
     [ -n "$line" ] || continue
     echo "FLEET_SYNC: $line"
   done < "$tmp"
+}
+
+# Orphaned task records: a recorded worktree path is not a task identity. A pooled
+# treehouse slot returned after a task finishes is handed to the next task, so a
+# record that outlived its own cleanup (one PR worked under several task ids arms the
+# merge watch on the newest id only) ends up naming a live task's worktree.
+# Read-only and detect-only: the ownership marker fm-spawn.sh writes into each
+# worktree names its current occupant, and bin/fm-teardown.sh refuses on a mismatch
+# regardless. This just surfaces the stale record before anyone reaches that refusal.
+orphaned_record_check() {
+  local meta id wt owner marker
+  [ -d "$STATE" ] || return 0
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    wt=$(fm_meta_get "$meta" worktree)
+    [ -n "$wt" ] && [ -d "$wt" ] || continue
+    marker="$wt/.fm-task-id"
+    [ -f "$marker" ] && [ ! -L "$marker" ] || continue
+    owner=$(head -1 "$marker" 2>/dev/null | tr -d '\r' || true)
+    [ -n "$owner" ] && [ "$owner" != "$id" ] || continue
+    echo "ORPHANED_RECORD: task $id records worktree $wt, which now belongs to task $owner"
+  done
 }
 
 fleet_sync() {
@@ -867,6 +892,7 @@ if [ -n "$tangle_branch" ]; then
     echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
   fi
 fi
+orphaned_record_check
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ -n "$crew" ] && [ "$crew" != "default" ]; then

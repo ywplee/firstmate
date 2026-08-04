@@ -786,7 +786,51 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+# A recorded worktree path is not a task identity: a pooled slot returned after one
+# task finishes is handed to the next, so a record that outlived its own cleanup can
+# name a live task's worktree. Bootstrap reports that from the worktree's ownership
+# marker, so the stale record surfaces before anyone reaches teardown's refusal.
+run_bootstrap_with_task_record() {
+  local case_dir=$1 marker_owner=$2 fixture root home fakebin wt
+  fixture=$(make_routine_bootstrap_fixture "$case_dir")
+  root=${fixture%%|*}
+  fixture=${fixture#*|}
+  home=${fixture%%|*}
+  fakebin=${fixture#*|}
+  wt="$case_dir/wt"
+  mkdir -p "$wt"
+  printf '%s\n' "$marker_owner" > "$wt/.fm-task-id"
+  {
+    printf 'window=firstmate:fm-task-a\n'
+    printf 'worktree=%s\n' "$wt"
+    printf 'kind=ship\n'
+  } > "$home/state/task-a.meta"
+  PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    bash "$ROOT/bin/fm-bootstrap.sh"
+}
+
+test_recycled_worktree_is_reported_as_orphaned_record() {
+  local out
+  out=$(run_bootstrap_with_task_record "$TMP_ROOT/orphaned-record" task-b)
+  assert_contains "$out" "ORPHANED_RECORD: task task-a records worktree" \
+    "bootstrap should report a record whose worktree was recycled"
+  assert_contains "$out" "which now belongs to task task-b" \
+    "orphaned-record line should name the worktree's current owner"
+  pass "bootstrap reports a task record whose worktree now belongs to another task"
+}
+
+test_owned_worktree_is_not_reported_as_orphaned_record() {
+  local out
+  out=$(run_bootstrap_with_task_record "$TMP_ROOT/owned-record" task-a)
+  assert_not_contains "$out" "ORPHANED_RECORD" \
+    "a record that still owns its worktree must stay silent"
+  pass "bootstrap stays silent for a task record that still owns its worktree"
+}
+
 test_bootstrap_reporting
+test_recycled_worktree_is_reported_as_orphaned_record
+test_owned_worktree_is_not_reported_as_orphaned_record
 test_no_mistakes_min_version
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected

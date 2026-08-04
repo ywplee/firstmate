@@ -4,6 +4,9 @@
 # clear volatile state, refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
+# REFUSES unconditionally - --force included - when the recorded worktree no longer
+# belongs to this task, because a pooled slot handed to the next task makes the
+# recorded PATH an unreliable identity. See require_worktree_still_owned below.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -516,6 +519,65 @@ canonical_existing_dir() {
   ( cd "$target" && pwd -P )
 }
 
+# A recorded worktree PATH is not a task identity. A treehouse slot returned to the
+# pool is handed to the next task, so a task record that outlives its own cleanup
+# (e.g. one PR worked under several task ids, where only the newest id was torn
+# down) can point at a different, LIVE task's worktree. Acting on that path returns
+# someone else's worktree, and --force would destroy their unpushed work outright.
+# Ownership is proven two ways, in order:
+#   1. The .fm-task-id marker fm-spawn.sh writes inside the worktree. It always
+#      names the slot's CURRENT occupant, because the next spawn overwrites it, so
+#      a recycled slot never passes as its previous owner.
+#   2. Failing that (a task spawned before the marker existed, or a secondmate home,
+#      which carries .fm-secondmate-home instead), any OTHER task record in this
+#      home claiming the same physical path.
+# Either proof of a different owner is an unconditional stop: --force authorizes
+# discarding THIS task's unlanded work, never another task's.
+TASK_ID_MARKER=.fm-task-id
+
+worktree_marker_owner() {
+  local dir=$1 owner
+  [ -n "$dir" ] && [ -d "$dir" ] || return 1
+  [ -f "$dir/$TASK_ID_MARKER" ] && [ ! -L "$dir/$TASK_ID_MARKER" ] || return 1
+  owner=$(head -1 "$dir/$TASK_ID_MARKER" 2>/dev/null | tr -d '\r') || return 1
+  [ -n "$owner" ] || return 1
+  printf '%s\n' "$owner"
+}
+
+conflicting_meta_owner() {
+  local dir=$1 abs other other_id other_wt other_abs
+  abs=$(canonical_existing_dir "$dir") || return 1
+  for other in "$STATE"/*.meta; do
+    [ -f "$other" ] || continue
+    other_id=$(basename "$other" .meta)
+    [ "$other_id" != "$ID" ] || continue
+    other_wt=$(meta_value "$other" worktree)
+    other_abs=$(canonical_existing_dir "$other_wt") || continue
+    [ "$other_abs" = "$abs" ] || continue
+    printf '%s\n' "$other_id"
+    return 0
+  done
+  return 1
+}
+
+require_worktree_still_owned() {
+  local owner
+  [ -n "$WT" ] && [ -d "$WT" ] || return 0
+  if owner=$(worktree_marker_owner "$WT"); then
+    [ "$owner" != "$ID" ] || return 0
+    echo "REFUSED: worktree $WT belongs to task $owner, not task $ID." >&2
+    echo "Task $ID's recorded path was recycled to $owner, which may be live and holding unlanded work." >&2
+  elif owner=$(conflicting_meta_owner "$WT"); then
+    echo "REFUSED: worktree $WT is also recorded for task $owner, so it cannot be shown to still belong to task $ID." >&2
+    echo "One of the two records is stale; acting on the path could tear down $owner's work." >&2
+  else
+    return 0
+  fi
+  echo "This is not a --force case: --force discards task $ID's own work, never task $owner's." >&2
+  echo "Confirm which task really owns $WT, then remove the stale record ($STATE/<stale-id>.meta and its .status) instead." >&2
+  return 1
+}
+
 retry_wait_secs_is_valid() {
   [[ "$1" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]
 }
@@ -688,7 +750,9 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$)' | head -1 || true)
+  # firstmate's own worktree-resident bookkeeping is never the captain's work, so it
+  # must not read as uncommitted changes even if git's exclude write did not take.
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$|\.fm-task-id$)' | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -1018,12 +1082,12 @@ cleanup_firstmate_home_children() {
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-        rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
+        rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend" "$child_wt/$TASK_ID_MARKER"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-      rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
+      rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend" "$child_wt/$TASK_ID_MARKER"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
         if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
           :
@@ -1051,6 +1115,10 @@ remove_secondmate_registry_entry() {
   grep -vE "^- $id( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv "$tmp" "$SECONDMATE_REG"
 }
+
+# Slot identity, before ANY mutation path (including --stop and --force): the
+# recorded worktree must still belong to this task. See require_worktree_still_owned.
+require_worktree_still_owned || exit 1
 
 # Process-stop (ephemeral secondmate): end the resident agent and keep every
 # durable trace. Handled up front, before any retirement/removal path, so it can
@@ -1196,7 +1264,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
         git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
       fi
     fi
-    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
+    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend" "$WT/$TASK_ID_MARKER"
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
@@ -1208,7 +1276,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     fi
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
-  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
+  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend" "$WT/$TASK_ID_MARKER"
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks

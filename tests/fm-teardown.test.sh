@@ -49,6 +49,14 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#
+# Also covers slot identity: a pooled worktree path is not a task identity, so a
+# stale record can name a live task's recycled worktree.
+#   (z1) marker names a different task                        -> REFUSE, names both
+#   (z2) same, with --force                                   -> REFUSE, work intact
+#   (z3) marker names this task                               -> ALLOW, marker cleared
+#   (z4) unmarked + a second record claims the same path      -> REFUSE, names both
+#   (z5) unmarked + no competing record                       -> ALLOW  (no regression)
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -1371,7 +1379,135 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   pass "herdr projection teardown retains the stale journal and attempts no workspace cleanup when exact-pane close is unconfirmed"
 }
 
+# Slot identity (recycled-worktree hazard). A finished task's record can outlive its
+# cleanup - one PR worked under several task ids arms the merge watch on the newest
+# id only, so the earlier record is orphaned. Its worktree path meanwhile goes back to
+# the treehouse pool and is handed to a different, LIVE task. Tearing down the stale
+# id then targeted the live task's worktree; it survived only because the live task
+# happened to have unlanded commits, and --force would have destroyed them outright.
+# Ownership is proven by the .fm-task-id marker fm-spawn.sh writes into the worktree,
+# or - for records predating it - by another record in the same home claiming the path.
+
+# Simulate the slot having been recycled to <owner-id> after task-x1's record went
+# stale: the marker names the worktree's current occupant, not task-x1.
+mark_worktree_owned_by() {
+  local case_dir=$1 owner=$2
+  printf '%s\n' "$owner" > "$case_dir/wt/.fm-task-id"
+}
+
+test_recycled_worktree_marker_refuses_naming_both_tasks() {
+  local case_dir rc
+  case_dir=$(make_case recycled-marker)
+  write_meta "$case_dir" no-mistakes ship
+  mark_worktree_owned_by "$case_dir" task-x2
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "recycled-marker: teardown should refuse a worktree owned by another task"
+  assert_grep REFUSED "$case_dir/stderr" "recycled-marker: no REFUSED line"
+  assert_grep 'task-x2' "$case_dir/stderr" "recycled-marker: refusal did not name the current owner"
+  assert_grep 'task-x1' "$case_dir/stderr" "recycled-marker: refusal did not name the task being torn down"
+  pass "teardown refuses a recycled worktree and names both the stale and owning task"
+}
+
+test_recycled_worktree_marker_refuses_under_force() {
+  local case_dir rc head
+  case_dir=$(make_case recycled-marker-force)
+  write_meta "$case_dir" no-mistakes ship
+  # The live occupant's unpushed work - exactly what --force would have destroyed.
+  wt_commit "$case_dir" "other task's unpushed work"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  mark_worktree_owned_by "$case_dir" task-x2
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "recycled-marker-force: --force must not bypass the ownership refusal"
+  assert_grep REFUSED "$case_dir/stderr" "recycled-marker-force: no REFUSED line"
+  [ -f "$case_dir/wt/.fm-task-id" ] || fail "recycled-marker-force: teardown removed another task's ownership marker"
+  [ "$(git -C "$case_dir/wt" rev-parse HEAD)" = "$head" ] \
+    || fail "recycled-marker-force: teardown disturbed the other task's unpushed work"
+  pass "--force cannot discard another task's worktree (it only ever authorizes discarding this task's own work)"
+}
+
+test_owned_worktree_marker_tears_down_normally() {
+  local case_dir rc
+  case_dir=$(make_case owned-marker)
+  write_meta "$case_dir" no-mistakes ship
+  mark_worktree_owned_by "$case_dir" task-x1
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "owned-marker: teardown of a genuinely owned worktree should succeed"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "owned-marker: teardown printed a REFUSED line"
+  [ ! -e "$case_dir/wt/.fm-task-id" ] \
+    || fail "owned-marker: teardown left its ownership marker in the pooled worktree"
+  pass "teardown of a worktree this task still owns is unaffected, and clears its marker"
+}
+
+test_worktree_claimed_by_second_record_refuses() {
+  local case_dir rc
+  case_dir=$(make_case duplicate-record)
+  write_meta "$case_dir" no-mistakes ship
+  # A record predating the marker: ownership can only be judged from the records.
+  fm_write_meta "$case_dir/state/task-x2.meta" \
+    "window=fm-task-x2" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "duplicate-record: teardown should refuse an unprovable worktree claim"
+  assert_grep REFUSED "$case_dir/stderr" "duplicate-record: no REFUSED line"
+  assert_grep 'task-x2' "$case_dir/stderr" "duplicate-record: refusal did not name the other claiming task"
+  pass "teardown refuses when a second task record claims the same worktree and no marker settles it"
+}
+
+test_unmarked_worktree_without_conflict_tears_down_normally() {
+  local case_dir rc
+  case_dir=$(make_case unmarked-legacy)
+  write_meta "$case_dir" no-mistakes ship
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "unmarked-legacy: a sole unmarked record should still tear down"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "unmarked-legacy: teardown printed a REFUSED line"
+  pass "a task spawned before the ownership marker existed still tears down when nothing disputes its worktree"
+}
+
+# Structural: the refusals above are only as good as the marker fm-spawn writes, so
+# pin the producing half of the contract too. Both sides name the file literally.
+test_spawn_writes_the_ownership_marker() {
+  grep -qE '> "[^"]*/\.fm-task-id"' "$ROOT/bin/fm-spawn.sh" \
+    || fail "fm-spawn no longer writes the .fm-task-id ownership marker teardown relies on"
+  grep -qE "exclude_path '\.fm-task-id'" "$ROOT/bin/fm-spawn.sh" \
+    || fail "fm-spawn no longer keeps .fm-task-id out of git's view"
+  pass "fm-spawn writes and git-excludes the ownership marker teardown checks"
+}
+
 test_local_only_fork_remote_allows
+test_spawn_writes_the_ownership_marker
+test_recycled_worktree_marker_refuses_naming_both_tasks
+test_recycled_worktree_marker_refuses_under_force
+test_owned_worktree_marker_tears_down_normally
+test_worktree_claimed_by_second_record_refuses
+test_unmarked_worktree_without_conflict_tears_down_normally
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
