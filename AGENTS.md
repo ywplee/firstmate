@@ -372,6 +372,12 @@ The skill owns the daemon procedure; these safety facts remain inline:
 
 Load `stuck-crewmate-recovery` after a stale wake, looping or confused pane, answered-by-brief question, unresponsive worker, or failed steer.
 
+### Budget-pause stub
+
+A Claude usage-limit pause does not self-resume when the window resets and firstmate does not self-wake on it, so before going quiet on such a pause, run `bin/fm-budget-pause-timer.sh <id>` for the binding task; its `--help` owns exact mechanics.
+It arms a registered one-shot watcher check that wakes firstmate once the binding quota window has actually reset, so the fleet is not left silently idling until the captain happens to send a message.
+On that wake, nudging each paused worker back to its documented resume point remains firstmate's judgment call, not the timer's.
+
 ## 9. Escalation and captain etiquette
 
 **Talk in outcomes, not mechanics.**
