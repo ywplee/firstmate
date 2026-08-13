@@ -52,7 +52,8 @@
 # than guess, so pass --reset or --window explicitly instead.
 #
 # Refuses loudly, with no check armed, when: the reserved id already denotes a
-# real task record or backlog item, quota-axi is not on PATH (and no --reset
+# real task record or backlog item, data/backlog.md exists but cannot be read
+# to rule that collision out, quota-axi is not on PATH (and no --reset
 # was given), the reset time cannot be resolved or parsed, a reset instant
 # resolved from quota-axi (auto-picked or --window; never the explicit --reset
 # override, which stays the operator's own business) is already in the past
@@ -101,12 +102,15 @@ squote() {
   printf "'%s'" "$value"
 }
 
-# True if data/backlog.md has a "- [ ] <key>" or "- [x] <key>" item header for
-# the given key. Mirrors the id-parsing convention bin/fm-backlog-handoff.sh
-# uses (an item header's id is the first whitespace-delimited token after the
-# checkbox); a missing backlog file is not a collision.
+# Reports whether data/backlog.md has a "- [ ] <key>" or "- [x] <key>" item
+# header for the given key. Mirrors the id-parsing convention
+# bin/fm-backlog-handoff.sh uses (an item header's id is the first
+# whitespace-delimited token after the checkbox); a missing backlog file is not
+# a collision. Exits 0 on a match, 1 on a clean no-match, and 2 when the
+# backlog exists but could not be read, so the caller can tell "no collision"
+# apart from "could not tell" instead of arming on a parser failure.
 backlog_has_id() {
-  local file=$1 key=$2
+  local file=$1 key=$2 status=0
   [ -f "$file" ] || return 1
   awk -v key="$key" '
     /^- \[[ x]\] / {
@@ -117,7 +121,11 @@ backlog_has_id() {
       if (id == key) { found = 1; exit }
     }
     END { exit found ? 0 : 1 }
-  ' "$file"
+  ' "$file" || status=$?
+  case "$status" in
+    0|1) return "$status" ;;
+    *) return 2 ;;
+  esac
 }
 
 # Resolve one or more ISO 8601 reset timestamps to the latest of them, printing
@@ -193,8 +201,13 @@ STATE=$(cd "$STATE" && pwd) || fail "state directory is unavailable"
 META="$STATE/$RESERVED_ID.meta"
 [ ! -e "$META" ] \
   || fail "reserved check id '$RESERVED_ID' collides with an existing task record at state/$RESERVED_ID.meta; rename or remove that task before arming the budget-pause timer"
-! backlog_has_id "$DATA/backlog.md" "$RESERVED_ID" \
-  || fail "reserved check id '$RESERVED_ID' collides with an existing backlog item in data/backlog.md; rename or remove it before arming the budget-pause timer"
+BACKLOG_STATUS=0
+backlog_has_id "$DATA/backlog.md" "$RESERVED_ID" || BACKLOG_STATUS=$?
+case "$BACKLOG_STATUS" in
+  0) fail "reserved check id '$RESERVED_ID' collides with an existing backlog item in data/backlog.md; rename or remove it before arming the budget-pause timer" ;;
+  1) ;;
+  *) fail "could not read data/backlog.md to rule out a '$RESERVED_ID' backlog collision; resolve its access permissions before arming the budget-pause timer" ;;
+esac
 
 CHECK="$STATE/$RESERVED_ID.check.sh"
 TRUST="$STATE/$RESERVED_ID.check-trust"

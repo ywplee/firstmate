@@ -2,7 +2,8 @@
 # Tests for bin/fm-budget-pause-timer.sh: arming the reserved fleet-level
 # one-shot budget-pause resume check, reset-time resolution (explicit override
 # and quota-axi auto-pick), and the refusal guarantees (no clobbering an armed
-# check, no reserved-id collision with a real task or backlog item).
+# check, no reserved-id collision with a real task or backlog item, no arming
+# when the backlog cannot be read to rule that collision out).
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -106,6 +107,23 @@ test_refuses_when_the_reserved_id_has_a_backlog_item() {
     "backlog collision refusal did not explain itself"
   assert_absent "$home/state/budget-pause.check.sh" "check was armed despite a colliding backlog item"
   pass "refuses to arm when the reserved id already denotes a real backlog item"
+}
+
+test_refuses_when_the_backlog_cannot_be_read() {
+  local home status
+  home=$(make_home backlogunreadable)
+  printf '## Queued\n- [ ] something-else - unrelated item (kind: ship)\n' > "$home/data/backlog.md"
+  chmod 000 "$home/data/backlog.md"
+  status=0
+  FM_HOME="$home" "$TIMER" --reset "2099-01-01T00:00:00+00:00" \
+    >/dev/null 2>"$home/err.txt" || status=$?
+  chmod 600 "$home/data/backlog.md"
+  expect_code 1 "$status" "unreadable-backlog exit code"
+  assert_contains "$(cat "$home/err.txt")" "could not read data/backlog.md" \
+    "unreadable-backlog refusal did not explain itself"
+  assert_absent "$home/state/budget-pause.check.sh" "check was armed without ruling out a backlog collision"
+  assert_absent "$home/state/budget-pause.check-trust" "trust record was armed without ruling out a backlog collision"
+  pass "refuses to arm when data/backlog.md exists but cannot be parsed"
 }
 
 test_auto_picks_most_exhausted_window() {
@@ -372,6 +390,7 @@ test_refuses_to_clobber_existing_armed_check
 test_refuses_a_task_id_argument
 test_refuses_when_the_reserved_id_has_a_task_record
 test_refuses_when_the_reserved_id_has_a_backlog_item
+test_refuses_when_the_backlog_cannot_be_read
 test_auto_picks_most_exhausted_window
 test_refuses_when_no_window_is_exhausted
 test_auto_pick_ignores_other_providers_and_model_windows
