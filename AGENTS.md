@@ -374,7 +374,8 @@ Load `stuck-crewmate-recovery` after a stale wake, looping or confused pane, ans
 
 ### Budget-pause stub
 
-A Claude usage-limit pause does not self-resume when the window resets and firstmate does not self-wake on it, so before going quiet on such a pause, run `bin/fm-budget-pause-timer.sh <id>` for the binding task; its `--help` owns exact mechanics.
+A Claude usage-limit pause does not self-resume when the window resets and firstmate does not self-wake on it, so before going quiet on such a pause, run `bin/fm-budget-pause-timer.sh`; its `--help` owns exact mechanics.
+It is a single fleet-level timer with no task id - a budget pause stops every worker at once, so it always arms the one reserved slot, never a per-task one.
 It arms a registered one-shot watcher check that wakes firstmate once the binding quota window has actually reset, so the fleet is not left silently idling until the captain happens to send a message.
 On that wake, nudging each paused worker back to its documented resume point remains firstmate's judgment call, not the timer's.
 

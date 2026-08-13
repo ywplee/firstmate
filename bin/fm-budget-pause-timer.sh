@@ -1,24 +1,25 @@
 #!/usr/bin/env bash
-# fm-budget-pause-timer.sh - arm a one-shot watcher check that fires once a
-# budget-pause quota window has reset.
+# fm-budget-pause-timer.sh - arm the fleet-level one-shot watcher check that
+# fires once a budget-pause quota window has reset.
 #
 # A Claude usage-limit pause does not self-resume when the window resets, and
 # firstmate does not self-wake, so the whole fleet silently idles until the
-# captain happens to send a message. This script arms the fix: it resolves the
-# binding quota window's reset instant, writes a one-shot state/<id>.check.sh
-# that stays silent until that instant has passed, then prints exactly one wake
-# line and deletes itself and its trust file, and registers it with
-# bin/fm-check-register.sh so the watcher is allowed to execute it.
+# captain happens to send a message. A budget pause is a property of the fleet,
+# not of any one task - one exhausted quota window stops every worker at once,
+# and one reset un-stops all of them - so this arms a single reserved-slot
+# timer, never a per-task one. It resolves the binding quota window's reset
+# instant, writes a one-shot state/budget-pause.check.sh that stays silent
+# until that instant has passed, then prints exactly one wake line and deletes
+# itself and its trust file, and registers it with bin/fm-check-register.sh so
+# the watcher is allowed to execute it.
 #
 # The generated check never steers or resumes anything itself: that judgment
 # call stays with firstmate at wake time.
 #
 # Usage:
-#   fm-budget-pause-timer.sh <id> --reset <ISO8601-timestamp>
-#   fm-budget-pause-timer.sh <id> [--provider <provider>] [--window <window-id>]
+#   fm-budget-pause-timer.sh --reset <ISO8601-timestamp>
+#   fm-budget-pause-timer.sh [--provider <provider>] [--window <window-id>]
 #
-#   <id>                the task id to arm the timer under; state/<id>.meta
-#                        must already exist.
 #   --reset <timestamp> use this reset instant instead of asking quota-axi.
 #                        Accepts any ISO 8601 timestamp quota-axi itself emits,
 #                        e.g. 2026-08-13T21:09:59.624315+00:00. Mutually
@@ -30,6 +31,16 @@
 #                        (.providers[].windows[].id), e.g. five_hour,
 #                        seven_day, model:fable.
 #
+# No task id is accepted. The timer always occupies the reserved slot
+# state/budget-pause.check.sh (and state/budget-pause.check-trust) - a
+# constant baked into this script, not caller-supplied, so no invocation can
+# aim it at a real task's check slot and collide with that task's own armed
+# check (for example a PR merge poll, which lives at the same
+# state/<id>.check.sh path for its own id). Refuses loudly, before arming
+# anything, if the reserved id is already in use for something real: a task
+# record at state/budget-pause.meta, or a backlog item with that id in
+# data/backlog.md.
+#
 # With no --reset, the binding window is auto-picked among the provider's own
 # general (non model-scoped) windows with percentRemaining == 0: when more than
 # one is exhausted, the fleet stays paused until the LAST of them resets, so the
@@ -40,27 +51,31 @@
 # remaining, quota-axi is treated as unable to answer and this refuses rather
 # than guess, so pass --reset or --window explicitly instead.
 #
-# Refuses loudly, with no check armed, when: quota-axi is not on PATH (and no
-# --reset was given), the reset time cannot be resolved or parsed, a reset
-# instant resolved from quota-axi (auto-picked or --window; never the explicit
-# --reset override, which stays the operator's own business) is already in the
-# past (stale or wrong quota-axi data - arming on it would fire on the
-# watcher's very next poll while the fleet is still paused), <id> has no
-# state/<id>.meta task record, or state/<id>.check.sh or
-# state/<id>.check-trust already exists
-# (never silently clobbers an existing armed check - stop it first if you
-# intend to replace it). If registration itself fails, the generated check is
-# removed again so the watcher never sees an unauthenticated leftover.
+# Refuses loudly, with no check armed, when: the reserved id already denotes a
+# real task record or backlog item, quota-axi is not on PATH (and no --reset
+# was given), the reset time cannot be resolved or parsed, a reset instant
+# resolved from quota-axi (auto-picked or --window; never the explicit --reset
+# override, which stays the operator's own business) is already in the past
+# (stale or wrong quota-axi data - arming on it would fire on the watcher's
+# very next poll while the fleet is still paused), or
+# state/budget-pause.check.sh or state/budget-pause.check-trust already exists
+# (never silently clobbers an existing armed check - two live budget timers is
+# a bug, so stop the existing one first if you intend to replace it). If
+# registration itself fails, the generated check is removed again so the
+# watcher never sees an unauthenticated leftover.
 #
-# On success prints the same "registered: state/<id>.check.sh" line
+# On success prints the same "registered: state/budget-pause.check.sh" line
 # bin/fm-check-register.sh prints; the watcher then executes the generated
 # check on its normal poll cadence.
 set -eu
+
+RESERVED_ID=budget-pause
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 QUOTA_AXI_BIN="${FM_QUOTA_AXI_BIN:-quota-axi}"
 
 # shellcheck source=bin/fm-pr-lib.sh
@@ -84,6 +99,25 @@ fail() {
 squote() {
   local value=${1//\'/\'\\\'\'}
   printf "'%s'" "$value"
+}
+
+# True if data/backlog.md has a "- [ ] <key>" or "- [x] <key>" item header for
+# the given key. Mirrors the id-parsing convention bin/fm-backlog-handoff.sh
+# uses (an item header's id is the first whitespace-delimited token after the
+# checkbox); a missing backlog file is not a collision.
+backlog_has_id() {
+  local file=$1 key=$2
+  [ -f "$file" ] || return 1
+  awk -v key="$key" '
+    /^- \[[ x]\] / {
+      rest = $0
+      sub(/^- \[[ x]\] +/, "", rest)
+      id = rest
+      sub(/[ \t].*/, "", id)
+      if (id == key) { found = 1; exit }
+    }
+    END { exit found ? 0 : 1 }
+  ' "$file"
 }
 
 # Resolve one or more ISO 8601 reset timestamps to the latest of them, printing
@@ -114,7 +148,6 @@ print(latest.isoformat())
 ' "$@"
 }
 
-ID=
 RESET_OVERRIDE=
 PROVIDER=claude
 PROVIDER_SET=0
@@ -143,18 +176,11 @@ while [ "$#" -gt 0 ]; do
       fail "unknown option: $1"
       ;;
     *)
-      if [ -z "$ID" ]; then
-        ID=$1
-        shift
-      else
-        fail "unexpected argument: $1"
-      fi
+      fail "unexpected argument: $1 (this timer takes no task id - it always arms the reserved '$RESERVED_ID' slot)"
       ;;
   esac
 done
 
-[ -n "$ID" ] || fail "usage: fm-budget-pause-timer.sh <id> [--reset <timestamp>] [--provider <name>] [--window <id>]"
-fm_pr_task_id_valid "$ID" || fail "invalid task id: $ID"
 if [ -n "$RESET_OVERRIDE" ] && [ -n "$WINDOW" ]; then
   fail "--reset and --window are mutually exclusive"
 fi
@@ -164,13 +190,16 @@ fi
 
 [ -d "$STATE" ] && [ ! -L "$STATE" ] || fail "state directory is unavailable"
 STATE=$(cd "$STATE" && pwd) || fail "state directory is unavailable"
-META="$STATE/$ID.meta"
-[ -f "$META" ] && [ ! -L "$META" ] || fail "no task record for '$ID' (state/$ID.meta is missing)"
+META="$STATE/$RESERVED_ID.meta"
+[ ! -e "$META" ] \
+  || fail "reserved check id '$RESERVED_ID' collides with an existing task record at state/$RESERVED_ID.meta; rename or remove that task before arming the budget-pause timer"
+! backlog_has_id "$DATA/backlog.md" "$RESERVED_ID" \
+  || fail "reserved check id '$RESERVED_ID' collides with an existing backlog item in data/backlog.md; rename or remove it before arming the budget-pause timer"
 
-CHECK="$STATE/$ID.check.sh"
-TRUST="$STATE/$ID.check-trust"
-[ ! -e "$CHECK" ] || fail "an armed check already exists at state/$ID.check.sh; stop or remove it before re-arming"
-[ ! -e "$TRUST" ] || fail "an armed check trust record already exists at state/$ID.check-trust; stop or remove it before re-arming"
+CHECK="$STATE/$RESERVED_ID.check.sh"
+TRUST="$STATE/$RESERVED_ID.check-trust"
+[ ! -e "$CHECK" ] || fail "the budget-pause timer is already armed at state/$RESERVED_ID.check.sh; stop or remove it before re-arming"
+[ ! -e "$TRUST" ] || fail "the budget-pause timer's trust record already exists at state/$RESERVED_ID.check-trust; stop or remove it before re-arming"
 
 # --- resolve the reset instant ---------------------------------------------
 
@@ -246,8 +275,8 @@ trap 'exit 1' HUP INT TERM
 
 cat > "$TMP" <<CHECKSH
 #!/usr/bin/env bash
-# Generated by fm-budget-pause-timer.sh. One-shot budget-pause resume check for
-# task '$ID'. Stays silent until $RESET_TIME (epoch $RESET_EPOCH UTC seconds)
+# Generated by fm-budget-pause-timer.sh. Fleet-level one-shot budget-pause
+# resume check. Stays silent until $RESET_TIME (epoch $RESET_EPOCH UTC seconds)
 # has passed, then prints exactly one wake line and deletes itself plus its
 # trust file so it never fires twice.
 set -eu
@@ -256,7 +285,7 @@ CHECK_PATH=$CHECK_QUOTED
 TRUST_PATH=$TRUST_QUOTED
 NOW=\$(date +%s)
 if [ "\$NOW" -ge "\$RESET_EPOCH" ]; then
-  printf 'budget pause window for %s has reset\n' '$ID'
+  printf 'budget pause window has reset\n'
   rm -f -- "\$CHECK_PATH" "\$TRUST_PATH"
 fi
 CHECKSH
@@ -269,8 +298,8 @@ mv -f -- "$TMP" "$CHECK" || fail "could not install generated check"
 TMP=
 
 REGISTER_STATUS=0
-"$SCRIPT_DIR/fm-check-register.sh" "$ID" || REGISTER_STATUS=$?
+"$SCRIPT_DIR/fm-check-register.sh" "$RESERVED_ID" || REGISTER_STATUS=$?
 if [ "$REGISTER_STATUS" -ne 0 ]; then
   rm -f -- "$CHECK" "$TRUST"
-  fail "could not register the generated check; removed state/$ID.check.sh (nothing is armed)"
+  fail "could not register the generated check; removed state/$RESERVED_ID.check.sh (nothing is armed)"
 fi
