@@ -33,10 +33,12 @@
 # With no --reset, the binding window is auto-picked among the provider's own
 # general (non model-scoped) windows with percentRemaining == 0: when more than
 # one is exhausted, the fleet stays paused until the LAST of them resets, so the
-# one with the latest resetsAt is picked, not the soonest. A non-exhausted
-# window never influences the choice. If no window reads 0% remaining,
-# quota-axi is treated as unable to answer and this refuses rather than guess,
-# so pass --reset or --window explicitly instead.
+# one with the latest resetsAt is picked, not the soonest. Candidates are
+# compared as parsed instants rather than as strings, so a provider mixing UTC
+# offsets or timestamp shapes across its windows cannot skew the choice. A
+# non-exhausted window never influences the choice. If no window reads 0%
+# remaining, quota-axi is treated as unable to answer and this refuses rather
+# than guess, so pass --reset or --window explicitly instead.
 #
 # Refuses loudly, with no check armed, when: quota-axi is not on PATH (and no
 # --reset was given), the reset time cannot be resolved or parsed, the
@@ -80,6 +82,34 @@ fail() {
 squote() {
   local value=${1//\'/\'\\\'\'}
   printf "'%s'" "$value"
+}
+
+# Resolve one or more ISO 8601 reset timestamps to the latest of them, printing
+# its epoch seconds and then a normalized single-line rendering. Comparing
+# parsed instants rather than raw strings keeps the choice chronological even
+# when a provider mixes UTC offsets or timestamp shapes across its windows.
+resolve_latest_reset() {
+  python3 -c '
+import datetime, sys
+
+latest = None
+for raw in sys.argv[1:]:
+    text = raw.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        sys.exit(1)
+    if dt.tzinfo is None:
+        sys.exit(1)
+    if latest is None or dt > latest:
+        latest = dt
+if latest is None:
+    sys.exit(1)
+print(int(latest.timestamp()))
+print(latest.isoformat())
+' "$@"
 }
 
 ID=
@@ -142,9 +172,11 @@ TRUST="$STATE/$ID.check-trust"
 
 # --- resolve the reset instant ---------------------------------------------
 
-RESET_TIME=$RESET_OVERRIDE
+CANDIDATES=()
 AUTO_RESOLVED=0
-if [ -z "$RESET_TIME" ]; then
+if [ -n "$RESET_OVERRIDE" ]; then
+  CANDIDATES=("$RESET_OVERRIDE")
+else
   AUTO_RESOLVED=1
   command -v "$QUOTA_AXI_BIN" >/dev/null 2>&1 \
     || fail "quota-axi is not on PATH; pass --reset <timestamp> to arm without it"
@@ -155,39 +187,41 @@ if [ -z "$RESET_TIME" ]; then
     || fail "quota-axi could not report on provider '$PROVIDER'"
 
   if [ -n "$WINDOW" ]; then
-    RESET_TIME=$(printf '%s' "$QUOTA_JSON" \
+    CANDIDATE_LIST=$(printf '%s' "$QUOTA_JSON" \
       | jq -r --arg p "$PROVIDER" --arg w "$WINDOW" \
         '[.providers[]? | select(.provider == $p) | .windows[]?
           | select(.id == $w)][0].resetsAt // empty') \
       || fail "could not parse quota-axi output"
-    [ -n "$RESET_TIME" ] || fail "provider '$PROVIDER' has no window '$WINDOW' to arm against"
+    [ -n "$CANDIDATE_LIST" ] || fail "provider '$PROVIDER' has no window '$WINDOW' to arm against"
   else
-    RESET_TIME=$(printf '%s' "$QUOTA_JSON" \
+    CANDIDATE_LIST=$(printf '%s' "$QUOTA_JSON" \
       | jq -r --arg p "$PROVIDER" \
-        '[.providers[]? | select(.provider == $p) | .windows[]?
-          | select(.percentRemaining == 0 and (.kind? // "") != "model")]
-                | sort_by(.resetsAt) | last | .resetsAt // empty') \
+        '.providers[]? | select(.provider == $p) | .windows[]?
+          | select(.percentRemaining == 0 and (.kind? // "") != "model")
+          | .resetsAt // empty') \
       || fail "could not parse quota-axi output"
-    [ -n "$RESET_TIME" ] || fail "no exhausted window found for provider '$PROVIDER'; pass --reset <timestamp> or --window <id> to arm explicitly"
+    [ -n "$CANDIDATE_LIST" ] || fail "no exhausted window found for provider '$PROVIDER'; pass --reset <timestamp> or --window <id> to arm explicitly"
   fi
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    CANDIDATES+=("$candidate")
+  done <<< "$CANDIDATE_LIST"
+  [ "${#CANDIDATES[@]}" -gt 0 ] || fail "provider '$PROVIDER' reported no usable reset timestamp"
 fi
 
 command -v python3 >/dev/null 2>&1 || fail "python3 is required to parse the reset timestamp"
-RESET_EPOCH=$(python3 -c '
-import datetime, sys
-raw = sys.argv[1].strip()
-if raw.endswith("Z"):
-    raw = raw[:-1] + "+00:00"
-try:
-    dt = datetime.datetime.fromisoformat(raw)
-except ValueError:
-    sys.exit(1)
-if dt.tzinfo is None:
-    sys.exit(1)
-print(int(dt.timestamp()))
-' "$RESET_TIME") || fail "could not parse reset timestamp: $RESET_TIME"
+RESOLVED=$(resolve_latest_reset "${CANDIDATES[@]}") \
+  || fail "could not parse reset timestamp: ${CANDIDATES[*]}"
+RESET_EPOCH=${RESOLVED%%$'\n'*}
+RESET_TIME=${RESOLVED#*$'\n'}
 case "$RESET_EPOCH" in
   ''|*[!0-9]*) fail "resolved reset epoch is not a plain integer: $RESET_EPOCH" ;;
+esac
+# The normalized timestamp is baked into the generated check's comment, so hold
+# it to a strict single-line character set: anything else would let a crafted
+# reset value inject bytes into the generated script body.
+case "$RESET_TIME" in
+  ''|*[!0-9A-Za-z:.+-]*) fail "resolved reset timestamp is not a plain timestamp: $RESET_TIME" ;;
 esac
 
 if [ "$AUTO_RESOLVED" = 1 ]; then
@@ -224,6 +258,8 @@ if [ "\$NOW" -ge "\$RESET_EPOCH" ]; then
   rm -f -- "\$CHECK_PATH" "\$TRUST_PATH"
 fi
 CHECKSH
+bash -n "$TMP" 2>/dev/null \
+  || fail "generated check is not valid bash; refusing to arm a check the watcher could only fail silently on"
 chmod 0700 "$TMP" || fail "could not set check script permissions"
 fm_pr_private_file_valid "$TMP" 700 "$STATE_DEVICE" || fail "generated check failed validation"
 fm_pr_regular_destination_on_device_or_absent "$CHECK" "$STATE_DEVICE" || fail "check destination is unavailable"
