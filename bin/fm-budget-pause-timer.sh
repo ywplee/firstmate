@@ -25,7 +25,7 @@
 #                        exclusive with --provider/--window.
 #   --provider <name>   quota-axi provider to query (default: claude).
 #   --window <id>       use this window's resetsAt directly instead of
-#                        auto-picking the most-exhausted window. Window ids
+#                        auto-picking among the exhausted windows. Window ids
 #                        come from `quota-axi --provider <name> --json`
 #                        (.providers[].windows[].id), e.g. five_hour,
 #                        seven_day, model:fable.
@@ -41,11 +41,13 @@
 # than guess, so pass --reset or --window explicitly instead.
 #
 # Refuses loudly, with no check armed, when: quota-axi is not on PATH (and no
-# --reset was given), the reset time cannot be resolved or parsed, the
-# auto-resolved (non-override) reset instant is already in the past (stale or
-# wrong quota-axi data - arming on it would fire on the watcher's very next
-# poll while the fleet is still paused), <id> has no state/<id>.meta task
-# record, or state/<id>.check.sh or state/<id>.check-trust already exists
+# --reset was given), the reset time cannot be resolved or parsed, a reset
+# instant resolved from quota-axi (auto-picked or --window; never the explicit
+# --reset override, which stays the operator's own business) is already in the
+# past (stale or wrong quota-axi data - arming on it would fire on the
+# watcher's very next poll while the fleet is still paused), <id> has no
+# state/<id>.meta task record, or state/<id>.check.sh or
+# state/<id>.check-trust already exists
 # (never silently clobbers an existing armed check - stop it first if you
 # intend to replace it). If registration itself fails, the generated check is
 # removed again so the watcher never sees an unauthenticated leftover.
