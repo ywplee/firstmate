@@ -30,19 +30,23 @@
 #                        (.providers[].windows[].id), e.g. five_hour,
 #                        seven_day, model:fable.
 #
-# With no --reset, the binding window is auto-picked as the provider's own
-# general (non model-scoped) window with percentRemaining == 0 whose reset comes
-# soonest; if no window reads 0%
-# remaining, quota-axi is treated as unable to answer and this refuses rather
-# than guess, so pass --reset or --window explicitly instead.
+# With no --reset, the binding window is auto-picked among the provider's own
+# general (non model-scoped) windows with percentRemaining == 0: when more than
+# one is exhausted, the fleet stays paused until the LAST of them resets, so the
+# one with the latest resetsAt is picked, not the soonest. A non-exhausted
+# window never influences the choice. If no window reads 0% remaining,
+# quota-axi is treated as unable to answer and this refuses rather than guess,
+# so pass --reset or --window explicitly instead.
 #
 # Refuses loudly, with no check armed, when: quota-axi is not on PATH (and no
-# --reset was given), the reset time cannot be resolved or parsed, <id> has no
-# state/<id>.meta task record, or state/<id>.check.sh or
-# state/<id>.check-trust already exists (never silently clobbers an existing
-# armed check - stop it first if you intend to replace it). If registration
-# itself fails, the generated check is removed again so the watcher never sees
-# an unauthenticated leftover.
+# --reset was given), the reset time cannot be resolved or parsed, the
+# auto-resolved (non-override) reset instant is already in the past (stale or
+# wrong quota-axi data - arming on it would fire on the watcher's very next
+# poll while the fleet is still paused), <id> has no state/<id>.meta task
+# record, or state/<id>.check.sh or state/<id>.check-trust already exists
+# (never silently clobbers an existing armed check - stop it first if you
+# intend to replace it). If registration itself fails, the generated check is
+# removed again so the watcher never sees an unauthenticated leftover.
 #
 # On success prints the same "registered: state/<id>.check.sh" line
 # bin/fm-check-register.sh prints; the watcher then executes the generated
@@ -139,7 +143,9 @@ TRUST="$STATE/$ID.check-trust"
 # --- resolve the reset instant ---------------------------------------------
 
 RESET_TIME=$RESET_OVERRIDE
+AUTO_RESOLVED=0
 if [ -z "$RESET_TIME" ]; then
+  AUTO_RESOLVED=1
   command -v "$QUOTA_AXI_BIN" >/dev/null 2>&1 \
     || fail "quota-axi is not on PATH; pass --reset <timestamp> to arm without it"
   command -v jq >/dev/null 2>&1 \
@@ -160,7 +166,7 @@ if [ -z "$RESET_TIME" ]; then
       | jq -r --arg p "$PROVIDER" \
         '[.providers[]? | select(.provider == $p) | .windows[]?
           | select(.percentRemaining == 0 and (.kind? // "") != "model")]
-                | sort_by(.resetsAt) | .[0].resetsAt // empty') \
+                | sort_by(.resetsAt) | last | .resetsAt // empty') \
       || fail "could not parse quota-axi output"
     [ -n "$RESET_TIME" ] || fail "no exhausted window found for provider '$PROVIDER'; pass --reset <timestamp> or --window <id> to arm explicitly"
   fi
@@ -183,6 +189,13 @@ print(int(dt.timestamp()))
 case "$RESET_EPOCH" in
   ''|*[!0-9]*) fail "resolved reset epoch is not a plain integer: $RESET_EPOCH" ;;
 esac
+
+if [ "$AUTO_RESOLVED" = 1 ]; then
+  NOW_EPOCH=$(date +%s)
+  if [ "$RESET_EPOCH" -lt "$NOW_EPOCH" ]; then
+    fail "resolved reset time $RESET_TIME is $((NOW_EPOCH - RESET_EPOCH))s in the past (stale or wrong quota-axi data); refusing to arm a check that would fire immediately - pass --reset to arm explicitly"
+  fi
+fi
 
 # --- generate and register the one-shot check -------------------------------
 

@@ -153,6 +153,56 @@ SH
   pass "auto-pick ignores other providers' windows and model-scoped windows"
 }
 
+test_auto_pick_prefers_the_latest_reset_when_multiple_windows_are_exhausted() {
+  local home fakebin
+  home=$(make_home multiexhausted)
+  fakebin=$(fm_fakebin "$home")
+  fm_write_meta "$home/state/t11.meta" "worktree=$home"
+  cat > "$fakebin/fake-quota-axi" <<'SH'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"providers":[{"provider":"claude","windows":[
+  {"id":"five_hour","percentRemaining":0,"resetsAt":"2030-07-01T00:00:00+00:00"},
+  {"id":"seven_day","percentRemaining":0,"resetsAt":"2030-08-01T00:00:00+00:00"}
+]}]}
+JSON
+SH
+  chmod +x "$fakebin/fake-quota-axi"
+  FM_HOME="$home" FM_QUOTA_AXI_BIN="$fakebin/fake-quota-axi" "$TIMER" t11 >/dev/null \
+    || fail "auto-pick arm should succeed"
+  assert_grep "RESET_EPOCH=1911772800" "$home/state/t11.check.sh" \
+    "auto-pick did not arm off the later of two exhausted windows"
+  local out
+  out=$(bash "$home/state/t11.check.sh")
+  [ -z "$out" ] || fail "check fired before the later exhausted window's reset: $out"
+  assert_present "$home/state/t11.check.sh" "check self-deleted before the later exhausted window's reset"
+  pass "auto-pick arms off the latest reset when more than one window is exhausted"
+}
+
+test_refuses_a_stale_reset_already_in_the_past() {
+  local home fakebin status
+  home=$(make_home stale)
+  fakebin=$(fm_fakebin "$home")
+  fm_write_meta "$home/state/t12.meta" "worktree=$home"
+  cat > "$fakebin/fake-quota-axi" <<'SH'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"providers":[{"provider":"claude","windows":[
+  {"id":"five_hour","percentRemaining":0,"resetsAt":"2020-01-01T00:00:00+00:00"}
+]}]}
+JSON
+SH
+  chmod +x "$fakebin/fake-quota-axi"
+  status=0
+  FM_HOME="$home" FM_QUOTA_AXI_BIN="$fakebin/fake-quota-axi" "$TIMER" t12 \
+    >/dev/null 2>"$home/err.txt" || status=$?
+  expect_code 1 "$status" "stale-reset exit code"
+  assert_contains "$(cat "$home/err.txt")" "in the past" "stale-reset refusal did not explain itself"
+  assert_absent "$home/state/t12.check.sh" "check was armed against a stale, already-past reset"
+  assert_absent "$home/state/t12.check-trust" "trust record was armed against a stale, already-past reset"
+  pass "refuses to auto-arm a reset that quota-axi already reports as past"
+}
+
 test_window_lookup_is_scoped_to_the_provider() {
   local home fakebin status
   home=$(make_home windowscope)
@@ -240,6 +290,8 @@ test_refuses_without_task_record
 test_auto_picks_most_exhausted_window
 test_refuses_when_no_window_is_exhausted
 test_auto_pick_ignores_other_providers_and_model_windows
+test_auto_pick_prefers_the_latest_reset_when_multiple_windows_are_exhausted
+test_refuses_a_stale_reset_already_in_the_past
 test_window_lookup_is_scoped_to_the_provider
 test_rejects_reset_combined_with_provider
 test_rolls_back_the_check_when_registration_fails
