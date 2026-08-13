@@ -30,8 +30,9 @@
 #                        (.providers[].windows[].id), e.g. five_hour,
 #                        seven_day, model:fable.
 #
-# With no --reset, the binding window is auto-picked as the provider's window
-# with percentRemaining == 0 whose reset comes soonest; if no window reads 0%
+# With no --reset, the binding window is auto-picked as the provider's own
+# general (non model-scoped) window with percentRemaining == 0 whose reset comes
+# soonest; if no window reads 0%
 # remaining, quota-axi is treated as unable to answer and this refuses rather
 # than guess, so pass --reset or --window explicitly instead.
 #
@@ -39,7 +40,9 @@
 # --reset was given), the reset time cannot be resolved or parsed, <id> has no
 # state/<id>.meta task record, or state/<id>.check.sh or
 # state/<id>.check-trust already exists (never silently clobbers an existing
-# armed check - stop it first if you intend to replace it).
+# armed check - stop it first if you intend to replace it). If registration
+# itself fails, the generated check is removed again so the watcher never sees
+# an unauthenticated leftover.
 #
 # On success prints the same "registered: state/<id>.check.sh" line
 # bin/fm-check-register.sh prints; the watcher then executes the generated
@@ -54,8 +57,6 @@ QUOTA_AXI_BIN="${FM_QUOTA_AXI_BIN:-quota-axi}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
-# shellcheck source=bin/fm-check-lib.sh
-. "$SCRIPT_DIR/fm-check-lib.sh"
 
 usage() {
   awk '
@@ -70,9 +71,17 @@ fail() {
   exit 1
 }
 
+# Render a value as a single-quoted shell word safe to bake into the generated
+# check, escaping any embedded single quote.
+squote() {
+  local value=${1//\'/\'\\\'\'}
+  printf "'%s'" "$value"
+}
+
 ID=
 RESET_OVERRIDE=
 PROVIDER=claude
+PROVIDER_SET=0
 WINDOW=
 
 while [ "$#" -gt 0 ]; do
@@ -86,6 +95,7 @@ while [ "$#" -gt 0 ]; do
     --provider)
       [ "$#" -ge 2 ] || fail "--provider requires a value"
       PROVIDER=$2
+      PROVIDER_SET=1
       shift 2
       ;;
     --window)
@@ -112,8 +122,12 @@ fm_pr_task_id_valid "$ID" || fail "invalid task id: $ID"
 if [ -n "$RESET_OVERRIDE" ] && [ -n "$WINDOW" ]; then
   fail "--reset and --window are mutually exclusive"
 fi
+if [ -n "$RESET_OVERRIDE" ] && [ "$PROVIDER_SET" = 1 ]; then
+  fail "--reset and --provider are mutually exclusive"
+fi
 
 [ -d "$STATE" ] && [ ! -L "$STATE" ] || fail "state directory is unavailable"
+STATE=$(cd "$STATE" && pwd) || fail "state directory is unavailable"
 META="$STATE/$ID.meta"
 [ -f "$META" ] && [ ! -L "$META" ] || fail "no task record for '$ID' (state/$ID.meta is missing)"
 
@@ -136,13 +150,16 @@ if [ -z "$RESET_TIME" ]; then
 
   if [ -n "$WINDOW" ]; then
     RESET_TIME=$(printf '%s' "$QUOTA_JSON" \
-      | jq -r --arg w "$WINDOW" \
-        '[.providers[]?.windows[]? | select(.id == $w)][0].resetsAt // empty') \
+      | jq -r --arg p "$PROVIDER" --arg w "$WINDOW" \
+        '[.providers[]? | select(.provider == $p) | .windows[]?
+          | select(.id == $w)][0].resetsAt // empty') \
       || fail "could not parse quota-axi output"
     [ -n "$RESET_TIME" ] || fail "provider '$PROVIDER' has no window '$WINDOW' to arm against"
   else
     RESET_TIME=$(printf '%s' "$QUOTA_JSON" \
-      | jq -r '[.providers[]?.windows[]? | select(.percentRemaining == 0)]
+      | jq -r --arg p "$PROVIDER" \
+        '[.providers[]? | select(.provider == $p) | .windows[]?
+          | select(.percentRemaining == 0 and (.kind? // "") != "model")]
                 | sort_by(.resetsAt) | .[0].resetsAt // empty') \
       || fail "could not parse quota-axi output"
     [ -n "$RESET_TIME" ] || fail "no exhausted window found for provider '$PROVIDER'; pass --reset <timestamp> or --window <id> to arm explicitly"
@@ -170,6 +187,8 @@ esac
 # --- generate and register the one-shot check -------------------------------
 
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || fail "could not stat state directory"
+CHECK_QUOTED=$(squote "$CHECK")
+TRUST_QUOTED=$(squote "$TRUST")
 
 TMP=$(mktemp "$STATE/.fm-budget-pause-check.XXXXXX") || fail "could not create temp file"
 cleanup() { [ -z "$TMP" ] || rm -f -- "$TMP"; }
@@ -184,8 +203,8 @@ cat > "$TMP" <<CHECKSH
 # trust file so it never fires twice.
 set -eu
 RESET_EPOCH=$RESET_EPOCH
-CHECK_PATH='$CHECK'
-TRUST_PATH='$TRUST'
+CHECK_PATH=$CHECK_QUOTED
+TRUST_PATH=$TRUST_QUOTED
 NOW=\$(date +%s)
 if [ "\$NOW" -ge "\$RESET_EPOCH" ]; then
   printf 'budget pause window for %s has reset\n' '$ID'
@@ -198,4 +217,9 @@ fm_pr_regular_destination_on_device_or_absent "$CHECK" "$STATE_DEVICE" || fail "
 mv -f -- "$TMP" "$CHECK" || fail "could not install generated check"
 TMP=
 
-"$SCRIPT_DIR/fm-check-register.sh" "$ID"
+REGISTER_STATUS=0
+"$SCRIPT_DIR/fm-check-register.sh" "$ID" || REGISTER_STATUS=$?
+if [ "$REGISTER_STATUS" -ne 0 ]; then
+  rm -f -- "$CHECK" "$TRUST"
+  fail "could not register the generated check; removed state/$ID.check.sh (nothing is armed)"
+fi
