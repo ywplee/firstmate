@@ -95,6 +95,7 @@ state/               volatile runtime signals; gitignored
   .pr-check-quarantine/  private non-runnable storage for checks neutralized by the non-executing migration
   .pr-check-migration.log  private per-task outcomes distinguishing rebuilt or canonically registered replacement polls, quarantined unarmed polls, and incomplete migrations
   .pr-check-migration-scan-v1  private marker proving the non-executing scan disabled every unsafe legacy check; .pr-check-migration-v1 separately records completed private repairs
+  budget-pause.check.sh  generated fleet-level budget-pause resume timer, with its own .check-trust; "budget-pause" is a reserved check id armed by bin/fm-budget-pause-timer.sh, never a task's own check (section 8)
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
@@ -371,6 +372,13 @@ The skill owns the daemon procedure; these safety facts remain inline:
 ### Stuck-worker trigger
 
 Load `stuck-crewmate-recovery` after a stale wake, looping or confused pane, answered-by-brief question, unresponsive worker, or failed steer.
+
+### Budget-pause stub
+
+A Claude usage-limit pause does not self-resume when the window resets and firstmate does not self-wake on it, so before going quiet on such a pause, run `bin/fm-budget-pause-timer.sh`; its `--help` owns exact mechanics.
+It is a single fleet-level timer with no task id - a budget pause stops every worker at once, so it always arms the one reserved slot, never a per-task one.
+It arms a registered one-shot watcher check that wakes firstmate once the binding quota window has actually reset, so the fleet is not left silently idling until the captain happens to send a message.
+On that wake, nudging each paused worker back to its documented resume point remains firstmate's judgment call, not the timer's.
 
 ## 9. Escalation and captain etiquette
 
