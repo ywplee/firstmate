@@ -242,6 +242,22 @@ Fetches blocked by an orphaned `.git/packed-refs.lock` use bounded retries and r
 Local-only projects, clones without an origin remote, and fetch failures remain benign skips.
 The refresh also prunes local branches whose remote is gone and that no worktree still needs.
 
+## core.bare tripwire
+
+A project clone can silently flip to `core.bare = true`, which breaks `git status`, `treehouse get`, and fleet sync for every worktree that shares the clone's config, and stays invisible until the next work-tree operation fails.
+The mechanism is a `git init` that resolves onto an existing clone's git-dir with no work tree in context, which reinitializes that git-dir as bare and writes `core.bare = true` into the shared config.
+The observed root cause was a project's pre-push hook running a test that calls `git init` without cleaning its inherited environment: git exports `GIT_DIR` (a per-worktree git-dir such as `<clone>/.git/worktrees/<name>`) into hook subprocesses, so the test's `git init`, run from an unrelated directory, reinitialized that git-dir as bare and flipped the shared `core.bare` for all of the clone's worktrees.
+The guard stays mechanism-agnostic so it also catches any other tool that does this; the deterministic reproduction lives in `tests/fm-bare-guard.test.sh` (exported worktree git-dir plus a plain `git init` run from another directory).
+
+`bin/fm-bare-guard-lib.sh` is the single owner of the detection, classification, repair, and incident-capture contract, sourced by three callers:
+
+- Bootstrap prints a read-only `PROJECT_BARE:` diagnostic at session start for any flipped clone, in both normal and detect-only (lock-refused) runs, and never repairs.
+- Fleet sync detects a flip before syncing and auto-repairs only when the clone is provably a normal populated work tree: `.git` is a directory, `HEAD` is a symbolic ref to the default branch, `origin/<default>` exists with `HEAD` an ancestor of it (no unlanded local commits), and the work tree is clean. It then resets only `core.bare` with `git config core.bare false`, re-verifies with `git rev-parse --is-bare-repository`, and continues the sync. A dirty tree, unique local commits, a detached HEAD, or a genuine by-design bare repo is refused as `STUCK:` and left completely untouched; nothing is ever forced, reset, stashed, cleaned, or checked out. Each repair appends a durable record to `data/project-bare-repairs.log`.
+- The watcher runs the same cheap detection in its periodic check sweep (`FM_CHECK_INTERVAL`, independent of the heartbeat backoff), so a flip surfaces as a `check:` wake within minutes rather than at the next session start. It surfaces once per unchanged flip and clears its marker when the flip is gone.
+
+Whenever the tripwire fires, the guard captures a bounded, timestamped attribution incident under `data/incidents/` (the clone path, the `.git/config` stat, git processes from `ps`, and a short tail of each live task's pane via `bin/fm-peek.sh`) so a recurrence can be attributed to the process that caused it; line widths and counts are capped and no environment is printed.
+Fleet sync's `core.bare false` write is part of the sanctioned fleet-sync project-write exception in [`AGENTS.md`](../AGENTS.md) section 1.
+
 ## Self-updates stay safe
 
 `/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.

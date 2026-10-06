@@ -33,8 +33,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-bare-guard-lib.sh
+. "$SCRIPT_DIR/fm-bare-guard-lib.sh"
 FM_LOCK_LOG_PREFIX=fleet-sync
 "$FM_ROOT/bin/fm-guard.sh" || true
 
@@ -297,9 +301,25 @@ sync_project() {
     echo "$label: skipped: not a directory"
     return 0
   fi
-  if ! git -C "$PROJ" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if ! git -C "$PROJ" rev-parse --git-dir >/dev/null 2>&1; then
     echo "$label: skipped: not a git repo"
     return 0
+  fi
+  if fm_bare_is_true "$PROJ"; then
+    fm_bare_capture_incident "$PROJ" "$DATA" "$STATE" >/dev/null || true
+    verdict=$(fm_bare_classify "$PROJ")
+    if [ "$verdict" = repairable ]; then
+      if fm_bare_repair "$PROJ" "$DATA"; then
+        echo "$label: repaired: core.bare was flipped to true, reset to false on a clean populated work tree - continuing sync"
+        fm_bare_clear_incident_marker "$PROJ" "$STATE"
+      else
+        echo "$label: STUCK: core.bare flipped to true and repair could not re-verify - needs attention"
+        return 0
+      fi
+    else
+      echo "$label: STUCK: core.bare flipped to true but $verdict - needs attention"
+      return 0
+    fi
   fi
   mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null || echo "no-mistakes off")
   mode=${mode_line%% *}

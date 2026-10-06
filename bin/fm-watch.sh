@@ -42,6 +42,10 @@
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
+#   check: project-bare: <repo>: core.bare=true ...
+#                          a project clone was silently flipped to core.bare=true
+#                          (docs/architecture.md "core.bare tripwire"); run fleet
+#                          sync to repair a provably-clean clone, else investigate
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
@@ -53,6 +57,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 mkdir -p "$STATE"
 
 # shellcheck source=bin/fm-wake-lib.sh
@@ -84,6 +90,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# shellcheck source=bin/fm-bare-guard-lib.sh
+. "$SCRIPT_DIR/fm-bare-guard-lib.sh"
 # Parent-owned secondmate missed-report guards: durable pending-reply
 # expectations created by fm-send on marked secondmate requests. The tick is
 # cheap when no records exist and never scrapes secondmate conversation.
@@ -610,6 +618,35 @@ heartbeat_scan_finds_actionable() {
   return 1
 }
 
+_bare_surfaced_path() { printf '%s/.bare-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr '/.:' '___')"; }
+
+bare_scan_find_flip() {
+  local proj sig sf surfaced verdict reason
+  [ -d "$PROJECTS" ] || return 1
+  for proj in "$PROJECTS"/*; do
+    [ -d "$proj" ] || continue
+    git -C "$proj" rev-parse --git-dir >/dev/null 2>&1 || continue
+    if ! fm_bare_is_true "$proj"; then
+      rm -f "$(_bare_surfaced_path "$proj")" 2>/dev/null || true
+      fm_bare_clear_incident_marker "$proj" "$STATE"
+      continue
+    fi
+    sig=$(stat_sig "$proj/.git/config")
+    sf=$(_bare_surfaced_path "$proj")
+    surfaced=$(cat "$sf" 2>/dev/null || true)
+    [ "$surfaced" = "$sig" ] && continue
+    verdict=$(fm_bare_classify "$proj")
+    if [ "$verdict" = repairable ]; then
+      reason="check: project-bare: $(basename "$proj"): core.bare=true on a populated work tree clone - run fleet sync to repair"
+    else
+      reason="check: project-bare: $(basename "$proj"): core.bare=true but $verdict - needs attention"
+    fi
+    printf '%s\t%s\t%s\n' "$proj" "$sig" "$reason"
+    return 0
+  done
+  return 1
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -796,6 +833,17 @@ while :; do
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
+    if bare_rec=$(bare_scan_find_flip); then
+      bare_clone=${bare_rec%%	*}
+      bare_rest=${bare_rec#*	}
+      bare_sig=${bare_rest%%	*}
+      bare_reason=${bare_rest#*	}
+      fm_bare_capture_incident "$bare_clone" "$DATA" "$STATE" >/dev/null || true
+      fm_wake_append check project-bare "$bare_reason" || exit 1
+      printf '%s' "$bare_sig" > "$(_bare_surfaced_path "$bare_clone")"
+      touch "$STATE/.last-check"
+      wake "$bare_reason"
+    fi
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
