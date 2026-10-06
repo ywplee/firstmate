@@ -994,6 +994,118 @@ test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse() {
   pass "Linux process identity detects pid reuse"
 }
 
+test_arm_singleton_second_rearm_is_instant_and_leaves_one_waiter() {
+  local dir state fakebin armout1 armout2 a1pid watcher_pid rc i
+  dir=$(make_case arm-singleton-instant)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout1="$dir/arm1.out"
+  armout2="$dir/arm2.out"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ARM_HARNESS=claude FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout1" &
+  a1pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout1" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$armout1" || fail "first arm did not start a watcher"
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(sed -n 1p "$state/.watch-waiter" 2>/dev/null || true)" = "$a1pid" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(sed -n 1p "$state/.watch-waiter" 2>/dev/null || true)" = "$a1pid" ] || fail "first arm did not record itself as the waiter"
+
+  rc=0
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ARM_HARNESS=claude FM_ARM_CONFIRM_TIMEOUT=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout2" || rc=$?
+  [ "$rc" -eq 0 ] || fail "second re-arm did not exit 0 as already-armed (status $rc): $(cat "$armout2")"
+  grep -qF "already armed: waiter pid=$a1pid is the live wake source" "$armout2" || fail "second re-arm did not report the live waiter: $(cat "$armout2")"
+  ! grep -qE 'watcher: (started|attached|FAILED)' "$armout2" || fail "second re-arm became a second waiter instead of an instant already-armed exit"
+  is_live_non_zombie "$a1pid" || fail "already-armed re-arm killed or disturbed the live waiter"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$watcher_pid" ] || fail "already-armed re-arm disturbed the watcher lock"
+  [ "$(sed -n 1p "$state/.watch-waiter" 2>/dev/null || true)" = "$a1pid" ] || fail "already-armed re-arm overwrote the waiter marker"
+
+  kill "$a1pid" "$watcher_pid" 2>/dev/null || true
+  wait "$a1pid" 2>/dev/null || true
+  pass "a second sequential re-arm exits instantly as already-armed and leaves exactly one waiter"
+}
+
+test_arm_singleton_ignores_recycled_waiter_marker() {
+  local dir state fakebin out armout wpid live armpid i
+  dir=$(make_case arm-singleton-recycled)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
+  sleep 300 &
+  live=$!
+  printf '%s\nidentity=%s\nharness=%s\n' "$live" "stale recycled identity" claude > "$state/.watch-waiter"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_HARNESS=claude FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$wpid" "$armout" || fail "arm did not take over past the recycled-pid marker: $(cat "$armout")"
+  ! grep -qF 'already armed' "$armout" || fail "arm trusted a recycled-pid waiter marker"
+  [ "$(sed -n 1p "$state/.watch-waiter" 2>/dev/null || true)" = "$armpid" ] || fail "arm did not claim the waiter marker after ignoring the recycled one"
+  kill "$armpid" "$wpid" "$live" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "arm ignores a recycled-pid waiter marker and takes over as the waiter"
+}
+
+test_arm_singleton_hands_over_after_waiter_death() {
+  local dir state fakebin out armout wpid dead armpid i
+  dir=$(make_case arm-singleton-handover)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
+  dead=$(dead_pid)
+  printf '%s\nidentity=%s\nharness=%s\n' "$dead" "dead waiter identity" claude > "$state/.watch-waiter"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_HARNESS=claude FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$wpid" "$armout" || fail "arm did not hand over past the dead-waiter marker: $(cat "$armout")"
+  ! grep -qF 'already armed' "$armout" || fail "arm trusted a dead waiter marker"
+  [ "$(sed -n 1p "$state/.watch-waiter" 2>/dev/null || true)" = "$armpid" ] || fail "arm did not claim the waiter marker after the dead waiter"
+  kill "$armpid" "$wpid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "arm hands over and becomes the waiter when the recorded waiter is dead"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse
@@ -1013,6 +1125,9 @@ test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
+test_arm_singleton_second_rearm_is_instant_and_leaves_one_waiter
+test_arm_singleton_ignores_recycled_waiter_marker
+test_arm_singleton_hands_over_after_waiter_death
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_reaps_abandoned_cycle_lock_owner_dirs

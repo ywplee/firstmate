@@ -11,6 +11,7 @@ When this session owns supervision and away mode is not active:
 4. Trust only the arm's one-line status.
 5. `watcher: started ...` or `watcher: attached ...` means a live cycle exists.
    On attach, the background task follows verified identity-matched successors instead of exiting when the first cycle ends.
+   `already armed: waiter pid=...` means a live cycle already exists with nothing to do: a redundant re-arm found the live waiter and exited at once, so do not re-arm again and do not treat it as a wake.
 6. Failure or missing cycle only: `watcher: FAILED ...` means supervision is down; fix and re-arm.
 7. After a successful start or attach status, end the turn.
    The background arm remains the live wait until it returns an actionable wake or failure.
