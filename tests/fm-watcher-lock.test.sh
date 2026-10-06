@@ -655,6 +655,45 @@ test_arm_starts_and_self_heals() {
   pass "arm starts+confirms a fresh watcher on a clean lock and self-heals a dead-pid lock (never healthy off a dead pid)"
 }
 
+test_arm_reaps_abandoned_cycle_lock_owner_dirs() {
+  local dir state fakebin armout armpid livepid dead i cl empty deadpid fresh live lock_pid
+  dir=$(make_case arm-cycle-lock-sweep)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  cl="$state/.watch-cycle-exits.lock"
+  dead=$(dead_pid)
+  sleep 300 &
+  livepid=$!
+  empty="$cl.owner.zzEMPTY"
+  deadpid="$cl.steal.owner.zzDEAD"
+  fresh="$cl.owner.zzFRESH"
+  live="$cl.owner.zzLIVE"
+  mkdir "$empty" "$deadpid" "$fresh" "$live"
+  printf '%s\n' "$dead" > "$deadpid/pid"
+  printf '%s\n' "$livepid" > "$live/pid"
+  touch -t 200001010000 "$empty" "$deadpid" "$live"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_GUARD_GRACE=300 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before the owner-dir sweep could be observed"
+  [ ! -d "$empty" ] || fail "sweep left an abandoned empty owner dir"
+  [ ! -d "$deadpid" ] || fail "sweep left an abandoned dead-pid steal owner dir"
+  [ -d "$fresh" ] || fail "sweep removed a fresh owner dir still inside the acquire grace"
+  [ -d "$live" ] || fail "sweep removed an owner dir held by a live pid"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  kill "$armpid" "$lock_pid" "$livepid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  wait "$livepid" 2>/dev/null || true
+  pass "arm reaps abandoned cycle-lock owner dirs but spares fresh and live-held ones"
+}
+
 test_arm_hup_cleans_child_and_temp_output() {
   local dir state fakebin armout i armpid lock_pid status
   dir=$(make_case arm-hup-cleanup)
@@ -976,6 +1015,7 @@ test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
+test_arm_reaps_abandoned_cycle_lock_owner_dirs
 test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down

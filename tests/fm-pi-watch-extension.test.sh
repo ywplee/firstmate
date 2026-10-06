@@ -745,7 +745,7 @@ try {
 }
 
 if (existsSync(process.env.FM_ARM_LOG)) throw new Error("watcher arm ran without lock ownership");
-writeFileSync(lock, `${process.pid}\n`);
+writeFileSync(lock, `${process.pid}\nidentity=fixture-identity\n`);
 const owned = await callArm();
 if (owned.details?.ok !== true || !owned.details.message.includes("started Pi extension arm child")) {
   throw new Error(`owned lock did not arm: ${JSON.stringify(owned.details)}`);
@@ -754,6 +754,9 @@ for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("owned lock did not run the watcher arm");
+writeFileSync(lock, `${process.pid}\n`);
+const legacy = await callArm();
+if (legacy.details?.ok !== true) throw new Error(`legacy single-line lock lost ownership: ${JSON.stringify(legacy.details)}`);
 EOF
 )
   status=$?
