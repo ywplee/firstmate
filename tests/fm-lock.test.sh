@@ -16,19 +16,13 @@ TMP_ROOT=$(fm_test_tmproot fm-lock-tests)
 
 # Spawn a live process whose command line looks like a verified harness, so the
 # legacy name-only fallback would classify it as a held session. The identity
-# check must still reject it when the recorded identity does not match. Backing
-# it in the caller's own shell (not a command substitution) keeps the test as the
-# direct parent, so its pid stays reliably live and reapable.
+# check must still reject it when the recorded identity does not match. The short
+# argv (exec -a) keeps the command well under any ps width, so fm_pid_identity is
+# byte-stable across reads; backing it in the caller's own shell (not a command
+# substitution) keeps the test the direct parent, so the pid stays reliably live.
 HARNESS_PID=
-spawn_harness_like() {  # <dir>; sets HARNESS_PID
-  local dir=$1 script
-  script="$dir/claude"
-  cat > "$script" <<'SH'
-#!/usr/bin/env bash
-while :; do sleep 1; done
-SH
-  chmod +x "$script"
-  "$script" >/dev/null 2>&1 &
+spawn_harness_like() {  # sets HARNESS_PID
+  bash -c 'exec -a claude-session sleep 3600' >/dev/null 2>&1 &
   HARNESS_PID=$!
 }
 
@@ -41,7 +35,7 @@ new_state() {  # <name>
 test_recycled_pid_is_reported_stale() {
   local state live out
   state=$(new_state recycled)
-  spawn_harness_like "$state"; live=$HARNESS_PID
+  spawn_harness_like; live=$HARNESS_PID
   {
     printf '%s\n' "$live"
     printf 'identity=%s\n' "linux-starttime=1 cmdline-hex=deadbeef original holder identity"
@@ -59,7 +53,7 @@ test_recycled_pid_is_reported_stale() {
 test_matching_identity_stays_held() {
   local state live identity out
   state=$(new_state matching)
-  spawn_harness_like "$state"; live=$HARNESS_PID
+  spawn_harness_like; live=$HARNESS_PID
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
     || fail "could not read live identity"
   [ -n "$identity" ] || fail "fm_pid_identity produced no identity for the live holder"
@@ -77,7 +71,7 @@ test_matching_identity_stays_held() {
 test_legacy_plain_pid_lock_still_works() {
   local state live dead held stale
   state=$(new_state legacy-held)
-  spawn_harness_like "$state"; live=$HARNESS_PID
+  spawn_harness_like; live=$HARNESS_PID
   printf '%s\n' "$live" > "$state/.lock"
   held=$(FM_STATE_OVERRIDE="$state" "$LOCK_SH" status 2>&1)
   kill "$live" 2>/dev/null || true
@@ -101,7 +95,7 @@ test_legacy_plain_pid_lock_still_works() {
 test_session_lock_body_roundtrips_and_reads_legacy() {
   local state live out
   state=$(new_state roundtrip)
-  spawn_harness_like "$state"; live=$HARNESS_PID
+  spawn_harness_like; live=$HARNESS_PID
   out=$(FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     lock="$3/.lock"
