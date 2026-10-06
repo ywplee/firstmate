@@ -216,11 +216,11 @@ test_bootstrap_detect_reports_project_bare_line() {
 }
 
 test_watcher_scan_surfaces_flip_once() {
-  local home clone out
+  local home clone scan_result_file
   home=$(new_home)
   clone=$(build_clone "$home" wscan)
   flip_bare "$clone"
-  out="$home/wscan.out"
+  scan_result_file="$home/wscan.out"
   (
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT"
     export FM_HOME FM_ROOT_OVERRIDE
@@ -236,18 +236,18 @@ test_watcher_scan_surfaces_flip_once() {
     clone_field=${rec%%	*}
     printf '%s' "$sig" > "$(_bare_surfaced_path "$clone_field")"
     if bare_scan_find_flip >/dev/null; then echo "RESURFACED"; else echo "OK"; fi
-  ) > "$out" 2>/dev/null
-  assert_grep "OK" "$out" "watcher scan did not surface the flip exactly once (dedup failed)"
-  assert_no_grep "NOFLIP" "$out" "watcher scan missed the flip"
-  assert_no_grep "BADREASON" "$out" "watcher scan reason was not in the check vocabulary"
-  assert_no_grep "RESURFACED" "$out" "watcher scan re-surfaced an already-surfaced flip"
+  ) > "$scan_result_file" 2>/dev/null
+  assert_grep "OK" "$scan_result_file" "watcher scan did not surface the flip exactly once (dedup failed)"
+  assert_no_grep "NOFLIP" "$scan_result_file" "watcher scan missed the flip"
+  assert_no_grep "BADREASON" "$scan_result_file" "watcher scan reason was not in the check vocabulary"
+  assert_no_grep "RESURFACED" "$scan_result_file" "watcher scan re-surfaced an already-surfaced flip"
   pass "the watcher periodic scan surfaces a flip as a check wake, once per unchanged flip"
 }
 
 test_watcher_scan_silent_on_healthy_fleet() {
-  local home out
+  local home scan_result_file
   home=$(new_home)
-  out="$home/healthy.out"
+  scan_result_file="$home/healthy.out"
   build_clone "$home" healthy >/dev/null
   (
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT"
@@ -255,8 +255,8 @@ test_watcher_scan_silent_on_healthy_fleet() {
     # shellcheck source=bin/fm-watch.sh disable=SC1091
     . "$ROOT/bin/fm-watch.sh"
     if bare_scan_find_flip >/dev/null; then echo "FLIP"; else echo "CLEAN"; fi
-  ) > "$out" 2>/dev/null
-  assert_grep "CLEAN" "$out" "watcher scan reported a flip on a healthy fleet"
+  ) > "$scan_result_file" 2>/dev/null
+  assert_grep "CLEAN" "$scan_result_file" "watcher scan reported a flip on a healthy fleet"
   pass "the watcher periodic scan is silent on a healthy fleet"
 }
 
