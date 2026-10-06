@@ -35,6 +35,16 @@ An actionable child output returns that reason normally.
 A zero/empty child return rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
 An attached arm follows verified identity-matched successors and reports the same typed failure if that chain ends without one.
 
+## Single waiter per harness session
+
+At most one arm blocks as the live waiter per home and harness, so a re-arm that finds a healthy watcher already backed by a live waiter never piles up a second blocked process.
+The blocking arm records a waiter marker at `state/.watch-waiter` (serialized by `state/.watch-waiter.lock` under the shared lock conventions) naming itself by pid, its `fm_pid_identity` (so a recycled pid is a mismatch), and the detected harness.
+A new `bin/fm-watch-arm.sh` arm (never `--restart`, which deliberately wants a fresh cycle) exits 0 at once with `already armed: waiter pid=<N> is the live wake source` only when a healthy watcher holds the lock AND that marker names a live identity-verified waiter for the same harness; it never blocks and never disturbs the older waiter.
+Anchoring the fast exit on the watcher's own liveness, not the marker alone, keeps continuity safe: a watcher that just fired is no longer healthy, so the next re-arm becomes the new waiter instead of wrongly standing down.
+If the recorded waiter is dead, or its identity or harness no longer matches, the new arm takes over as the waiter.
+The waiter marker is cleaned up when its owning arm exits, and an abandoned `state/.watch-waiter.lock` owner directory is reaped on the next arm the same way the cycle-log lock is.
+`opencode` and `pi` keep their adapter-owned single-flight through `--restart` and are unaffected; `claude` and `grok` re-arm through the plain arm, so they are the harnesses this fast exit protects.
+
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
 Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.
 The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYCLE_LOG_KEEP_LINES`.

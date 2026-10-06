@@ -23,8 +23,12 @@
 # single source of truth, shared with fm-watch.sh and fm-guard.sh), and prints
 # exactly one unambiguous status line:
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
-#   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
-#                                                          this arm attaches and follows it
+#   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh watcher holds the lock
+#                                                          and this arm becomes its single waiter
+#   already armed: waiter pid=<N> is the live wake source - a live+fresh watcher already has a
+#                                                          live identity-verified waiter for this
+#                                                          harness, so this re-arm is redundant
+#                                                          and exits 0 at once without blocking
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
@@ -36,8 +40,10 @@
 # reason; on attached it stays live across identity-matched successors. An
 # attached cycle that ends without a healthy successor is a typed nonzero failure,
 # never a clean empty completion. On FAILED it exits non-zero so the failure is
-# loud. A live cycle already present means re-arm attaches - do not start a second
-# watcher.
+# loud. A live cycle already present means the first re-arm attaches as the home's
+# single waiter and records a waiter marker; a later re-arm that finds that live
+# identity-verified waiter for the same harness exits 0 as "already armed" instead
+# of piling up a second waiter - never a second watcher and never a second waiter.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
@@ -78,6 +84,95 @@ CYCLE_LOG_KEEP_LINES=${FM_WATCH_CYCLE_LOG_KEEP_LINES:-1000}
 ARM_PID=${BASHPID:-$$}
 case "$CYCLE_LOG_MAX_BYTES" in ''|*[!0-9]*|0) CYCLE_LOG_MAX_BYTES=262144 ;; esac
 case "$CYCLE_LOG_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LOG_KEEP_LINES=1000 ;; esac
+
+WAITER_MARKER="$STATE/.watch-waiter"
+WAITER_LOCK="$STATE/.watch-waiter.lock"
+ARM_HARNESS=${FM_ARM_HARNESS:-}
+if [ -z "$ARM_HARNESS" ]; then
+  ARM_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || true)
+fi
+[ -n "$ARM_HARNESS" ] || ARM_HARNESS=unknown
+
+waiter_lock_acquire() {
+  local i=0
+  while ! fm_lock_try_acquire "$WAITER_LOCK"; do
+    [ "$i" -lt 20 ] || return 1
+    sleep 0.02
+    i=$((i + 1))
+  done
+}
+
+WAITER_PID=
+WAITER_IDENTITY=
+WAITER_HARNESS=
+read_waiter_marker() {
+  WAITER_PID=
+  WAITER_IDENTITY=
+  WAITER_HARNESS=
+  [ -f "$WAITER_MARKER" ] || return 1
+  local line number=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    number=$((number + 1))
+    case "$number" in
+      1) WAITER_PID=$line ;;
+      2) case "$line" in identity=*) WAITER_IDENTITY=${line#identity=} ;; esac ;;
+      3) case "$line" in harness=*) WAITER_HARNESS=${line#harness=} ;; esac ;;
+    esac
+  done < "$WAITER_MARKER"
+  [ -n "$WAITER_PID" ]
+}
+
+waiter_marker_is_live() {
+  local current
+  read_waiter_marker || return 1
+  [ "$WAITER_HARNESS" = "$ARM_HARNESS" ] || return 1
+  [ "$WAITER_PID" != "$ARM_PID" ] || return 1
+  [ -n "$WAITER_IDENTITY" ] || return 1
+  fm_pid_alive "$WAITER_PID" || return 1
+  current=$(fm_pid_identity "$WAITER_PID" 2>/dev/null || true)
+  [ -n "$current" ] && [ "$current" = "$WAITER_IDENTITY" ]
+}
+
+write_waiter_marker() {
+  local identity tmp
+  identity=$(fm_pid_identity "$ARM_PID" 2>/dev/null || true)
+  tmp="$WAITER_MARKER.tmp.$ARM_PID"
+  {
+    printf '%s\n' "$ARM_PID"
+    [ -n "$identity" ] && printf 'identity=%s\n' "$identity"
+    printf 'harness=%s\n' "$ARM_HARNESS"
+  } > "$tmp" 2>/dev/null && mv -f "$tmp" "$WAITER_MARKER" 2>/dev/null
+  rm -f "$tmp" 2>/dev/null || true
+}
+
+FAST_EXIT_WAITER_PID=
+claim_waiter_or_already_armed() {
+  FAST_EXIT_WAITER_PID=
+  waiter_lock_acquire || return 1
+  if healthy_watcher && waiter_marker_is_live; then
+    FAST_EXIT_WAITER_PID=$WAITER_PID
+    fm_lock_release "$WAITER_LOCK"
+    return 0
+  fi
+  write_waiter_marker
+  fm_lock_release "$WAITER_LOCK"
+  return 1
+}
+
+register_waiter() {
+  waiter_lock_acquire || return 0
+  write_waiter_marker
+  fm_lock_release "$WAITER_LOCK"
+}
+
+# shellcheck disable=SC2329
+clear_waiter_marker_if_mine() {
+  waiter_lock_acquire || return 0
+  if read_waiter_marker && [ "$WAITER_PID" = "$ARM_PID" ]; then
+    rm -f "$WAITER_MARKER" 2>/dev/null || true
+  fi
+  fm_lock_release "$WAITER_LOCK"
+}
 
 # The lifecycle ledger is diagnostic evidence, not a supervision dependency.
 # Writes are bounded and best-effort so an observability failure cannot stall an
@@ -206,9 +301,9 @@ cycle_mark_predecessor_successor() {
   fm_lock_release "$CYCLE_LOG_LOCK"
 }
 
-sweep_abandoned_cycle_lock_owner_dirs() {
-  local d pid
-  for d in "$CYCLE_LOG_LOCK".*owner.*; do
+sweep_abandoned_lock_owner_dirs() {
+  local lock=$1 d pid
+  for d in "$lock".*owner.*; do
     [ -d "$d" ] && [ ! -L "$d" ] || continue
     [ "$(fm_path_age "$d")" -ge "$GRACE" ] || continue
     pid=$(cat "$d/pid" 2>/dev/null || true)
@@ -340,7 +435,10 @@ case "${1:-}" in
   *) echo "usage: $(basename "$0") [--restart]" >&2; exit 2 ;;
 esac
 
-sweep_abandoned_cycle_lock_owner_dirs
+sweep_abandoned_lock_owner_dirs "$CYCLE_LOG_LOCK"
+sweep_abandoned_lock_owner_dirs "$WAITER_LOCK"
+
+trap 'clear_waiter_marker_if_mine' EXIT
 
 if [ "$mode" = restart ]; then
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
@@ -363,15 +461,22 @@ if [ "$mode" = restart ]; then
 fi
 
 # If a genuinely live+fresh watcher already holds the lock, do not start a second
-# one - attach to that cycle and wait until it ends so the harness notify fires
-# then, not as an immediate empty wake. (--restart skips this: it just stopped
-# this home's watcher and wants a fresh one.)
+# one. The first such re-arm attaches as this home's single waiter and records a
+# waiter marker; a later re-arm that finds that live identity-verified waiter for
+# the same harness exits 0 at once rather than piling up another blocked process.
+# (--restart skips this: it just stopped this home's watcher and wants a fresh one.)
 if [ "$mode" = arm ] && healthy_watcher; then
-  cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
-  cycle_begin "$HEALTHY_PID" attached
-  report_attached
-  attach_and_wait "$HEALTHY_PID"
-  exit $?
+  if claim_waiter_or_already_armed; then
+    echo "already armed: waiter pid=$FAST_EXIT_WAITER_PID is the live wake source"
+    exit 0
+  fi
+  if healthy_watcher; then
+    cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
+    cycle_begin "$HEALTHY_PID" attached
+    report_attached
+    attach_and_wait "$HEALTHY_PID"
+    exit $?
+  fi
 fi
 
 # Start a watcher as a tracked child and confirm it before settling in. The child
@@ -476,6 +581,7 @@ while :; do
     if [ "$HEALTHY_PID" = "$child" ]; then
       cycle_refresh_lock_before
       cycle_mark_predecessor_successor "started:$child"
+      register_waiter
       echo "watcher: started pid=$child (beacon fresh)"
       wait "$child"
       rc=$?

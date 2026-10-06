@@ -9,6 +9,7 @@ When this session owns supervision and away mode is not active:
    A shell `&`, a truncating pipe, or bundling is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`) registered in `.claude/settings.json`.
 6. Treat `watcher: started ...` and `watcher: attached ...` as proof that one live cycle exists.
    On attach, the background task follows verified identity-matched successors instead of exiting when the first cycle ends.
+   Treat `already armed: waiter pid=...` as proof a live cycle already exists with nothing to do: a redundant re-arm found the live waiter and exited at once, so do not start another cycle and do not treat it as a wake.
 7. Failure or missing cycle only: treat any `watcher: FAILED ...` result as an alarm and repair it before ending the turn.
 8. Ordinary wake: when the background task completes with `signal:`, `stale:`, `blocked:`, `check:`, or `heartbeat`, drain queued wakes, then start exactly one fresh background task before running other fleet commands to handle the wake.
    Do not invent a wake from an attach-status line alone; drain and act only on real wake records or a real watcher reason line.
