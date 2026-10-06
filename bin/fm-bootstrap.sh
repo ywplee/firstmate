@@ -14,6 +14,7 @@
 #                 "TANGLE: <remediation>",
 #                 "ORPHANED_RECORD: task <id> records worktree <path>, which now
 #                 belongs to task <other-id>",
+#                 "PROJECT_BARE: <repo>: core.bare=true ... <repair plan or refuse reason>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -102,6 +103,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-bare-guard-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-bare-guard-lib.sh"
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -141,6 +144,7 @@ fleet_sync_relay_filtered_output() {
       *': skipped:'*) echo "FLEET_SYNC: $line" ;;
       *': STUCK:'*) echo "FLEET_SYNC: $line" ;;
       *': recovered:'*) echo "FLEET_SYNC: $line" ;;
+      *': repaired:'*) echo "FLEET_SYNC: $line" ;;
     esac
   done < "$tmp"
 }
@@ -173,6 +177,23 @@ orphaned_record_check() {
     owner=$(head -1 "$marker" 2>/dev/null | tr -d '\r' || true)
     [ -n "$owner" ] && [ "$owner" != "$id" ] || continue
     echo "ORPHANED_RECORD: task $id records worktree $wt, which now belongs to task $owner"
+  done
+}
+
+project_bare_check() {
+  local proj label verdict
+  [ -d "$PROJECTS" ] || return 0
+  for proj in "$PROJECTS"/*; do
+    [ -d "$proj" ] || continue
+    git -C "$proj" rev-parse --git-dir >/dev/null 2>&1 || continue
+    fm_bare_is_true "$proj" || continue
+    label=$(basename "$proj")
+    verdict=$(fm_bare_classify "$proj")
+    if [ "$verdict" = repairable ]; then
+      echo "PROJECT_BARE: $label: core.bare=true on a populated work tree clone - fleet sync will reset it"
+    else
+      echo "PROJECT_BARE: $label: core.bare=true but $verdict"
+    fi
   done
 }
 
@@ -893,6 +914,7 @@ if [ -n "$tangle_branch" ]; then
   fi
 fi
 orphaned_record_check
+project_bare_check
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ -n "$crew" ] && [ "$crew" != "default" ]; then

@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, ORPHANED_RECORD, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, ORPHANED_RECORD, PROJECT_BARE, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -31,11 +31,17 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Never tear `<id>` down: teardown resolves its target from that recorded path, so the cleanup would land on `<other-id>`'s copy (`bin/fm-teardown.sh` refuses on exactly this, and `--force` cannot override it).
   Confirm `<id>` genuinely finished - its PR merged, or its work continued under a later task id - then remove only its stale records, `state/<id>.meta` and `state/<id>.status`, and close it out in the backlog.
   Leave `<other-id>` and its copy untouched.
+- `PROJECT_BARE: <repo>: core.bare=true ...` - a read-only tripwire found a project clone whose `core.bare` was silently flipped to true, which breaks `git status`, `treehouse get`, and fleet sync for every worktree of that clone (see `docs/architecture.md` "core.bare tripwire").
+  A `core.bare=true on a populated work tree clone - fleet sync will reset it` line is self-healing: the next fleet sync resets only that one setting on the provably-clean clone, so no action is needed beyond letting sync run (detect-only session-start never repairs).
+  A `core.bare=true but <refuse reason>` line (dirty, unique local commits, detached HEAD, or a genuine by-design bare repo) means the guard will refuse to repair and leave the clone untouched; inspect that clone before doing anything, and never force `core.bare false` by hand on a clone with unlanded work.
+  The guard captures a bounded incident under `data/incidents/` whenever it fires, for attribution.
 - `CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>` - the optional dispatch profile file exists but failed low-cost bootstrap validation; continue with the normal fallback chain, resolve and pass the chosen fallback harness explicitly while the file remains present, fix the malformed schema, unverified harness name, unknown selector, or invalid harness/effort pair when convenient, and do not select a bad profile.
 - `FLEET_SYNC: <repo>: skipped: <reason>` - a benign one-off skip (offline, no origin, local-only); bootstrap continued, investigate only if it blocks work.
   A skip can also report the bounded fleet-refresh timeout (`FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT`, or a fleet-size-aware default with a 20 second floor); a timeout never blocks startup.
 - `FLEET_SYNC: <repo>: recovered: <detail>` - the clone had drifted onto a clean detached HEAD holding no unique commits and the sync self-healed it (re-attached the default branch and fast-forwarded); no action needed, it is reported only so the self-heal is visible.
 - `FLEET_SYNC: <repo>: STUCK: on <state>, N commits behind <base> - needs attention` - the clone is dirty, on a non-default branch, detached with unique commits, or diverged, so the sync left it untouched (never forcing or discarding); it will keep falling behind until you look.
+- `FLEET_SYNC: <repo>: repaired: core.bare was flipped to true ... - continuing sync` - fleet sync found the clone silently flipped to `core.bare=true`, proved it a clean populated work tree, reset only that one setting, and continued; no action needed, and the repair is also recorded in `data/project-bare-repairs.log` (see `docs/architecture.md` "core.bare tripwire").
+- `FLEET_SYNC: <repo>: STUCK: core.bare flipped to true but <refuse reason> - needs attention` - the clone is flipped but not provably safe to repair (dirty, unique local commits, detached, or a genuine bare repo), so the sync refused and left it untouched; inspect that clone and never force `core.bare false` by hand on unlanded work.
   A loud STUCK, especially a growing N across bootstraps, means that clone needs hands-on attention; dispatch a crewmate or resolve it before it strands work.
 - `PR_CHECK_MIGRATION: canonical polls rebuilt and armed; resume supervision for this home` - the non-executing migration rebuilt canonical task polls from validated metadata, and those polls are already armed.
   Independently verify the private per-task outcome record, then resume the emitted supervision protocol after finishing the session-start wake handling.
