@@ -44,7 +44,10 @@
 # arm/watcher identities, timestamps, exit/signal classification, beacon age,
 # lock identity before and after close, and successor disposition. The separate
 # state/.watch-triage.log remains exclusively the watcher's absorbed-wake debug
-# log and is never written here.
+# log and is never written here. The ledger lock's mktemp owner directories leak
+# when an arm is killed mid-acquire (a burst of attached arms ending together),
+# so on startup the arm reaps any that are older than GRACE and hold a dead or no
+# pid - provably abandoned, never a live or in-flight acquire.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
@@ -203,6 +206,20 @@ cycle_mark_predecessor_successor() {
   fm_lock_release "$CYCLE_LOG_LOCK"
 }
 
+sweep_abandoned_cycle_lock_owner_dirs() {
+  local d pid
+  for d in "$CYCLE_LOG_LOCK".*owner.*; do
+    [ -d "$d" ] && [ ! -L "$d" ] || continue
+    [ "$(fm_path_age "$d")" -ge "$GRACE" ] || continue
+    pid=$(cat "$d/pid" 2>/dev/null || true)
+    if [ -n "$pid" ] && fm_pid_alive "$pid"; then
+      continue
+    fi
+    rm -f "$d/pid" 2>/dev/null || true
+    rmdir "$d" 2>/dev/null || true
+  done
+}
+
 clear_stale_recorded_watcher_lock() {
   local lock_home lock_path lock_identity
   lock_home=$(cat "$WATCH_LOCK/fm-home" 2>/dev/null || true)
@@ -322,6 +339,8 @@ case "${1:-}" in
   --restart) mode=restart ;;
   *) echo "usage: $(basename "$0") [--restart]" >&2; exit 2 ;;
 esac
+
+sweep_abandoned_cycle_lock_owner_dirs
 
 if [ "$mode" = restart ]; then
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.

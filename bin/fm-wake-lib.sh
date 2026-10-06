@@ -9,6 +9,7 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
+FM_LOCK_ACQUIRE_WAIT_TIMEOUT="${FM_LOCK_ACQUIRE_WAIT_TIMEOUT:-120}"
 mkdir -p "$STATE"
 
 fm_current_pid() {
@@ -54,6 +55,51 @@ fm_pid_identity() {
   out=$(LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
+}
+
+# Session-lock (state/.lock) holder helpers; bin/fm-lock.sh owns the file format.
+FM_SESSION_LOCK_PID=
+FM_SESSION_LOCK_IDENTITY=
+FM_SESSION_LOCK_LEGACY=
+# shellcheck disable=SC2034 # FM_SESSION_LOCK_IDENTITY/_LEGACY read by callers in other files.
+fm_session_lock_read() {
+  local lockfile=$1 line number=0
+  FM_SESSION_LOCK_PID=
+  FM_SESSION_LOCK_IDENTITY=
+  FM_SESSION_LOCK_LEGACY=1
+  [ -f "$lockfile" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    number=$((number + 1))
+    case "$number" in
+      1) FM_SESSION_LOCK_PID=$line ;;
+      2)
+        case "$line" in
+          identity=*)
+            FM_SESSION_LOCK_IDENTITY=${line#identity=}
+            FM_SESSION_LOCK_LEGACY=
+            ;;
+        esac
+        break
+        ;;
+    esac
+  done < "$lockfile"
+  [ -n "$FM_SESSION_LOCK_PID" ]
+}
+
+fm_session_lock_body() {
+  local pid=$1 identity
+  printf '%s\n' "$pid"
+  identity=$(fm_pid_identity "$pid" 2>/dev/null || true)
+  [ -n "$identity" ] && printf 'identity=%s\n' "$identity"
+  return 0
+}
+
+fm_session_lock_identity_live() {
+  local pid=$1 recorded=$2 current
+  [ -n "$recorded" ] || return 1
+  fm_pid_alive "$pid" || return 1
+  current=$(fm_pid_identity "$pid" 2>/dev/null || true)
+  [ -n "$current" ] && [ "$current" = "$recorded" ]
 }
 
 fm_path_mtime() {
@@ -342,8 +388,16 @@ fm_lock_try_acquire() {
 }
 
 fm_lock_acquire_wait() {
-  local lockdir=$1
+  local lockdir=$1 timeout=${2:-$FM_LOCK_ACQUIRE_WAIT_TIMEOUT} deadline
+  case "$timeout" in
+    ''|*[!0-9]*) timeout=$FM_LOCK_ACQUIRE_WAIT_TIMEOUT ;;
+  esac
+  deadline=$(( $(date +%s) + timeout ))
   while ! fm_lock_try_acquire "$lockdir"; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "fm-lock: timed out after ${timeout}s waiting to acquire $lockdir (held by pid ${FM_LOCK_HELD_PID:-unknown})" >&2
+      return 1
+    fi
     sleep 0.1
   done
 }
@@ -384,7 +438,7 @@ fm_wake_append() {
   seq_file="$STATE/.wake-queue.seq"
   status=0
 
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   seq=$(cat "$seq_file" 2>/dev/null || echo 0)
   case "$seq" in
     ''|*[!0-9]*) seq=0 ;;

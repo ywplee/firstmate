@@ -18,14 +18,20 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 fm_is_gate_agent "$FM_ROOT" && exit 0
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+
 lock_is_in_ancestry() {
   local lock_pid pid=$$ _
-  [ -f "$STATE/.lock" ] || return 1
-  IFS= read -r lock_pid < "$STATE/.lock" 2>/dev/null || return 1
+  fm_session_lock_read "$STATE/.lock" || return 1
+  lock_pid=$FM_SESSION_LOCK_PID
   case "$lock_pid" in
     ''|*[!0-9]*|1) return 1 ;;
   esac
-  kill -0 "$lock_pid" 2>/dev/null || return 1
+  fm_pid_alive "$lock_pid" || return 1
+  if [ -z "$FM_SESSION_LOCK_LEGACY" ]; then
+    fm_session_lock_identity_live "$lock_pid" "$FM_SESSION_LOCK_IDENTITY" || return 1
+  fi
   for _ in 1 2 3 4 5 6 7 8; do
     [ "$pid" = "$lock_pid" ] && return 0
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
