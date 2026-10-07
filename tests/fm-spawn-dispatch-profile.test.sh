@@ -745,6 +745,42 @@ test_codex_home_cascades_to_secondmate() {
   pass "codex-home cascades to the secondmate launch path on a home-path match"
 }
 
+test_codex_home_secondmate_outside_every_rule_uses_default() {
+  local rec id out status launch acct sm
+  id=codexhome-secondmate-nomatch-z1
+  rec=$(make_spawn_case codexhome-secondmate-nomatch codex "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  acct=$(make_codex_home "$CASE_DIR/codex-personal")
+  printf '%s %s\n' "$CASE_DIR/elsewhere" "$acct" > "$HOME_DIR/config/codex-home"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "codex secondmate spawn outside every rule should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CODEX_HOME" "a secondmate home outside every rule must launch on codex's default account"
+  pass "codex-home leaves an unmatched secondmate home on the default account"
+}
+
+test_codex_home_secondmate_outside_every_rule_uses_default() {
+  local rec id out status launch acct sm
+  id=codexhome-secondmate-nomatch-z1
+  rec=$(make_spawn_case codexhome-secondmate-nomatch codex "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  acct=$(make_codex_home "$CASE_DIR/codex-personal")
+  printf '%s %s\n' "$CASE_DIR/elsewhere" "$acct" > "$HOME_DIR/config/codex-home"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "codex secondmate spawn outside every rule should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CODEX_HOME" "a secondmate home outside every rule must launch on codex's default account"
+  pass "codex-home leaves an unmatched secondmate home on the default account"
+}
+
 test_no_profile_keeps_claude_launch_unchanged
 test_claude_cascades_spawner_config_dir
 test_claude_config_dir_defaults_when_unset
@@ -779,5 +815,6 @@ test_codex_home_refuses_when_auth_json_missing
 test_codex_home_path_metacharacters_not_evaled
 test_codex_home_prefix_is_claude_noop
 test_codex_home_cascades_to_secondmate
+test_codex_home_secondmate_outside_every_rule_uses_default
 
 echo "# all fm-spawn-dispatch-profile tests passed"
