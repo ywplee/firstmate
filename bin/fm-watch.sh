@@ -272,11 +272,18 @@ recorded_windows() {
 # Exit reporting a wake. Consecutive heartbeats with no other wake in between
 # mean an idle fleet, so the heartbeat interval backs off exponentially
 # (base * 2^streak, capped at HEARTBEAT_MAX); any real wake resets the cadence.
+# Release the home lock BEFORE emitting the wake so a watcher that has fired is no
+# longer the healthy lock holder the instant it fires. A re-arm racing the wake
+# then sees no healthy watcher and becomes the fresh waiter instead of standing
+# down behind a watcher that is about to vanish; the EXIT trap's release then
+# no-ops. This is the single source of truth for the invariant the arm layer's
+# "already armed" fast exit depends on (bin/fm-watch-arm.sh, docs/watcher-continuity.md).
 wake() {
   case "$1" in
     heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
   esac
+  fm_lock_release "$WATCH_LOCK"
   echo "$1"
   exit 0
 }
