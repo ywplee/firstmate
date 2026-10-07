@@ -36,7 +36,7 @@ The gap is a general class: any harness whose account is selected by a directory
 As of 2026-07-20, only `claude` needs the cascade in this fleet.
 
 - `claude` - AFFECTED and fixed. `CLAUDE_CONFIG_DIR` selects the config dir; the operator has a direnv rule (`~/src/personal/.envrc` exports `CLAUDE_CONFIG_DIR=$HOME/.claude-personal`) that never fires in the worktree, and the tmux server leaks the default config's `ANTHROPIC_BASE_URL` proxy into every pane.
-- `codex` - not affected in this fleet. `CODEX_HOME` (default `~/.codex`) is the analogous config-dir selector, but no directory-scoped convention sets it here. If one is added, apply the same env-prefix cascade to the `codex` template.
+- `codex` - AFFECTED and fixed (2026-10-06). `CODEX_HOME` (default `~/.codex`) is the analogous config-dir selector, and this operator now runs two codex logins: `~/.codex` is the work account and `~/.codex-personal` is the personal one. A plain `codex` launched from a disposable worktree would silently use the work account, which must never happen for a personal project. The fix is directory-scoped, exactly like `claude`'s: the firstmate-private, gitignored `config/codex-home` maps a source-project path prefix to a `CODEX_HOME` directory (`docs/configuration.md`), and `bin/fm-spawn.sh` picks the longest-matching rule for the project the spawn targets and carries it as a `CODEX_HOME=...` launch env prefix on both codex templates. The match is on the SOURCE PROJECT path, not the worktree path: treehouse worktrees live under `~/.treehouse`, which no `~/src/...` rule would ever match, so matching the worktree would defeat the whole fix. The spawner's own `CODEX_HOME` is never read (the nested-shell re-injection hazard described above for `ANTHROPIC_API_KEY` applies to any env var). No file or no matching rule leaves codex on its default account unchanged; a matched rule whose directory is missing or has no `auth.json` refuses the launch rather than falling back. The launch half is pinned by `tests/fm-spawn-dispatch-profile.test.sh`, and `config/codex-home` is inherited by secondmate homes (`FM_INHERITABLE_CONFIG` in `bin/fm-config-inherit-lib.sh`).
 - `opencode` - not affected in this fleet. Its config/auth dir is the analogous selector; no directory-scoped convention sets it here.
 - `pi` - not affected in this fleet. No directory-scoped credential convention in use.
 - `grok` - not affected in this fleet. Its config dir is already pinned explicitly per spawn (`GROK_HOME`), and no directory-scoped convention selects a grok account here.
@@ -174,6 +174,37 @@ CLAUDE_CONFIG_DIR=/Users/yewonlee/.claude-personal
 Under the abandoned conditional pass-through, the same contaminated invoking shell would have emitted `ANTHROPIC_API_KEY='sk-…'` into the launch and the child would have carried the work key; the static strip makes the child clean regardless.
 
 Note (2026-07-20): tearing the test scout down with `treehouse return` triggered a treehouse pool-wide reconciliation that detached and reset every sibling pool worktree, including an unrelated active worktree, discarding its uncommitted edits. `treehouse return` (and therefore `bin/fm-teardown.sh`, which calls it) is not safe to run while any sibling pool worktree has unlanded work. This is a treehouse behavior, outside firstmate's own tracked scripts.
+
+## Codex account scoping verification
+
+Environment: 2026-10-06, codex-cli 0.160.1, tmux backend. The operator runs two codex logins, and the `auth.json` id_token email claim (read without printing any token) identifies each:
+
+```
+.codex         -> yewon.lee@angellist.com   (work)
+.codex-personal -> ywplee@gmail.com          (personal)
+```
+
+With `config/codex-home` holding the single rule `~/src/personal ~/.codex-personal`, a real `bin/fm-spawn.sh` run for the firstmate repo (a project under `~/src/personal`), captured through a fake tmux that logs the literal launch command, emitted the codex launch with the personal account prefix:
+
+```
+$ cat config/codex-home
+/Users/yewonlee/src/personal /Users/yewonlee/.codex-personal
+$ bin/fm-spawn.sh vtask /Users/yewonlee/src/personal/firstmate   # harness=codex, fake pane
+CODEX_HOME='/Users/yewonlee/.codex-personal' codex --dangerously-bypass-approvals-and-sandbox -c "notify=[...]" "$(cat '.../vtask/brief.md')"
+```
+
+The match is on the source project path, not the worktree: the spawned worktree lived under `~/.treehouse/...`, which the `~/src/personal` rule would never match, so matching the worktree would have reverted the agent to codex's default (work) account.
+
+A real throwaway codex process started through that exact prefix carried the personal config dir in its actual environment (`ps eww` on the live process, no tokens printed), and ran on the personal account:
+
+```
+$ CODEX_HOME='/Users/yewonlee/.codex-personal' codex exec --dangerously-bypass-approvals-and-sandbox 'reply with exactly: OK'
+... provider: openai ... codex: OK
+$ ps eww -p <spawned-codex-pid> | tr ' ' '\n' | grep '^CODEX_HOME='
+CODEX_HOME=/Users/yewonlee/.codex-personal
+```
+
+A matched rule whose directory is missing or has no `auth.json` refuses the launch (fail closed) rather than falling back to `~/.codex`; no file or no matching rule emits no prefix at all. These cases, longest-prefix selection, the trailing-slash boundary, realpath matching through a symlink, the no-eval of path metacharacters, and claude-template non-interference are pinned by `tests/fm-spawn-dispatch-profile.test.sh`.
 
 ## Maintaining this file
 

@@ -559,6 +559,192 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+make_codex_home() {
+  mkdir -p "$1"
+  printf '{"tokens":{},"OPENAI_API_KEY":null}\n' > "$1/auth.json"
+  printf '%s\n' "$1"
+}
+
+test_codex_home_longest_prefix_selects_account() {
+  local rec id out status launch broad deep
+  id=codexhome-longest-z1
+  rec=$(make_spawn_case codexhome-longest codex "$id")
+  read_case_record "$rec"
+  broad=$(make_codex_home "$CASE_DIR/codex-broad")
+  deep=$(make_codex_home "$CASE_DIR/codex-deep")
+  {
+    printf '# codex account map\n'
+    printf '\n'
+    printf '%s %s\n' "$CASE_DIR" "$broad"
+    printf '%s %s\n' "$PROJ_DIR" "$deep"
+  } > "$HOME_DIR/config/codex-home"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex spawn with a matching codex-home rule should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$deep' codex " "codex launch did not select the longest-prefix account"
+  assert_not_contains "$launch" "CODEX_HOME='$broad'" "codex launch selected the shorter prefix over the longer match"
+  pass "codex launch selects the longest-matching codex-home prefix"
+}
+
+test_codex_home_prefix_boundary_personal_vs_other() {
+  local rec id out status launch personal other acct
+  id=codexhome-boundary-z1
+  rec=$(make_spawn_case codexhome-boundary codex "$id")
+  read_case_record "$rec"
+  personal="$CASE_DIR/personal"
+  other="$CASE_DIR/personal-other"
+  mkdir -p "$personal" "$other"
+  acct=$(make_codex_home "$CASE_DIR/codex-personal")
+  printf '%s %s\n' "$personal" "$acct" > "$HOME_DIR/config/codex-home"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$other")
+  status=$?
+  expect_code 0 "$status" "codex spawn on a sibling path should succeed without an account assignment"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CODEX_HOME" "a prefix must only match on a trailing-slash boundary, not personal-other under personal"
+  pass "codex-home prefix match respects the trailing-slash boundary (personal vs personal-other)"
+}
+
+test_codex_home_no_matching_rule_leaves_default() {
+  local rec id out status launch acct
+  id=codexhome-nomatch-z1
+  rec=$(make_spawn_case codexhome-nomatch codex "$id")
+  read_case_record "$rec"
+  acct=$(make_codex_home "$CASE_DIR/codex-personal")
+  printf '%s %s\n' "$CASE_DIR/elsewhere" "$acct" > "$HOME_DIR/config/codex-home"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex spawn with no matching rule should succeed unchanged"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CODEX_HOME" "no matching rule must leave codex on its default account"
+  pass "codex-home with no matching rule adds no account assignment"
+}
+
+test_codex_home_absent_file_leaves_launch_unchanged() {
+  local rec id out status launch
+  id=codexhome-absent-z1
+  rec=$(make_spawn_case codexhome-absent codex "$id")
+  read_case_record "$rec"
+  rm -f "$HOME_DIR/config/codex-home"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex spawn with no codex-home file should succeed unchanged"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CODEX_HOME" "an absent codex-home file must leave the codex launch unchanged"
+  pass "codex-home absent leaves the codex launch byte-unchanged (no assignment)"
+}
+
+test_codex_home_matches_through_symlinked_project() {
+  local rec id out status launch acct link
+  id=codexhome-symlink-z1
+  rec=$(make_spawn_case codexhome-symlink codex "$id")
+  read_case_record "$rec"
+  acct=$(make_codex_home "$CASE_DIR/codex-personal")
+  printf '%s %s\n' "$PROJ_DIR" "$acct" > "$HOME_DIR/config/codex-home"
+  link="$CASE_DIR/project-link"
+  ln -s "$PROJ_DIR" "$link"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$link")
+  status=$?
+  expect_code 0 "$status" "codex spawn via a symlinked project path should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$acct' codex " "codex-home must match on the realpath of a symlinked project path"
+  pass "codex-home matches the project's realpath through a symlink"
+}
+
+test_codex_home_refuses_when_account_dir_missing() {
+  local rec id out status launch
+  id=codexhome-nodir-z1
+  rec=$(make_spawn_case codexhome-nodir codex "$id")
+  read_case_record "$rec"
+  printf '%s %s\n' "$PROJ_DIR" "$CASE_DIR/codex-missing" > "$HOME_DIR/config/codex-home"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "codex spawn must refuse when the selected account dir is missing"
+  assert_contains "$out" "refusing to launch a codex worker" "refusal did not explain the missing account dir"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "codex" "a refused codex spawn must not emit a launch command"
+  pass "codex-home refuses (fails closed) when the selected account dir is missing"
+}
+
+test_codex_home_refuses_when_auth_json_missing() {
+  local rec id out status launch acct
+  id=codexhome-noauth-z1
+  rec=$(make_spawn_case codexhome-noauth codex "$id")
+  read_case_record "$rec"
+  acct="$CASE_DIR/codex-noauth"
+  mkdir -p "$acct"
+  printf '%s %s\n' "$PROJ_DIR" "$acct" > "$HOME_DIR/config/codex-home"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "codex spawn must refuse when the selected account dir has no auth.json"
+  assert_contains "$out" "refusing to launch a codex worker" "refusal did not explain the missing auth.json"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "codex" "a refused codex spawn must not emit a launch command"
+  pass "codex-home refuses (fails closed) when the selected account dir has no auth.json"
+}
+
+test_codex_home_path_metacharacters_not_evaled() {
+  local rec id out status launch acct marker
+  id=codexhome-meta-z1
+  rec=$(make_spawn_case codexhome-meta codex "$id")
+  read_case_record "$rec"
+  marker="$CASE_DIR/PWNED"
+  acct="$CASE_DIR/codex-\$(:>$marker)x"
+  make_codex_home "$acct" >/dev/null
+  printf '%s %s\n' "$PROJ_DIR" "$acct" > "$HOME_DIR/config/codex-home"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex spawn with a metacharacter account path should succeed"
+  assert_absent "$marker" "codex-home path must never be evaluated as a command substitution"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$acct' codex " "codex-home must carry a metacharacter path single-quoted, not expanded"
+  pass "codex-home shell-quotes the account path and never evals metacharacters"
+}
+
+test_codex_home_prefix_is_claude_noop() {
+  local rec id out status launch
+  id=codexhome-claude-z1
+  rec=$(make_spawn_case codexhome-claude claude "$id")
+  read_case_record "$rec"
+  make_codex_home "$CASE_DIR/codex-personal" >/dev/null
+  printf '%s %s\n' "$PROJ_DIR" "$CASE_DIR/codex-personal" > "$HOME_DIR/config/codex-home"
+
+  out=$( unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY GH_TOKEN
+    CLAUDE_CONFIG_DIR=/tmp/acct-personal \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" )
+  status=$?
+  expect_code 0 "$status" "claude spawn should succeed regardless of codex-home"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CODEX_HOME" "the codex-home cascade must be scoped to the codex template only"
+  pass "codex-home selection is a no-op for the claude template"
+}
+
+test_codex_home_cascades_to_secondmate() {
+  local rec id out status launch acct sm
+  id=codexhome-secondmate-z1
+  rec=$(make_spawn_case codexhome-secondmate codex "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  acct=$(make_codex_home "$CASE_DIR/codex-personal")
+  printf '%s %s\n' "$sm" "$acct" > "$HOME_DIR/config/codex-home"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "codex secondmate spawn with a matching codex-home rule should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$acct' codex " "codex secondmate launch did not cascade the matched account"
+  pass "codex-home cascades to the secondmate launch path on a home-path match"
+}
+
 test_no_profile_keeps_claude_launch_unchanged
 test_claude_cascades_spawner_config_dir
 test_claude_config_dir_defaults_when_unset
@@ -583,5 +769,15 @@ test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_codex_home_longest_prefix_selects_account
+test_codex_home_prefix_boundary_personal_vs_other
+test_codex_home_no_matching_rule_leaves_default
+test_codex_home_absent_file_leaves_launch_unchanged
+test_codex_home_matches_through_symlinked_project
+test_codex_home_refuses_when_account_dir_missing
+test_codex_home_refuses_when_auth_json_missing
+test_codex_home_path_metacharacters_not_evaled
+test_codex_home_prefix_is_claude_noop
+test_codex_home_cascades_to_secondmate
 
 echo "# all fm-spawn-dispatch-profile tests passed"
