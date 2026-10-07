@@ -1113,6 +1113,152 @@ test_arm_singleton_hands_over_after_waiter_death() {
   pass "arm hands over and becomes the waiter when the recorded waiter is dead"
 }
 
+test_arm_already_armed_requires_waiter_attached_to_the_live_watcher() {
+  # A live, identity-verified waiter is not enough: it must be attached to the
+  # watcher that currently holds the lock. A healthy watcher plus a live waiter
+  # whose marker names a DIFFERENT, now-dead watcher means that healthy watcher
+  # has no waiter, so the arm must take over instead of standing down.
+  local dir state fakebin out armout wpid waiter wident dead armpid i
+  dir=$(make_case arm-waiter-attach-mismatch)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
+  sleep 300 &
+  waiter=$!
+  wident=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$waiter") || fail "could not identify waiter pid"
+  dead=$(dead_pid)
+  printf '%s\nidentity=%s\nharness=%s\nwatcher-pid=%s\nwatcher-identity=%s\n' \
+    "$waiter" "$wident" claude "$dead" "dead attached watcher identity" > "$state/.watch-waiter"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ARM_HARNESS=claude FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$wpid" "$armout" || fail "arm did not take over a waiter attached to a stale watcher: $(cat "$armout")"
+  ! grep -qF 'already armed' "$armout" || fail "arm stood down behind a waiter attached to a different, dead watcher"
+  [ "$(sed -n 1p "$state/.watch-waiter" 2>/dev/null || true)" = "$armpid" ] || fail "arm did not claim the waiter marker"
+  grep -qxF "watcher-pid=$wpid" "$state/.watch-waiter" || fail "claimed marker did not record the live watcher the arm attached to"
+  kill "$armpid" "$wpid" "$waiter" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  wait "$waiter" 2>/dev/null || true
+  pass "arm stands down only when the live waiter is attached to the current healthy watcher"
+}
+
+test_arm_takes_over_when_watcher_ends_mid_decision() {
+  # The race PR 9 opened: a healthy watcher backed by a live waiter, but the
+  # watcher fires (releases its home lock) exactly as a new arm decides. The arm
+  # must re-check after its first positive decision and take over, never stand
+  # down behind a watcher and waiter that are about to vanish together. The
+  # decision hook removes the lock between the first decision and the re-check,
+  # modelling the production watcher that releases its lock the instant it fires.
+  local dir state fakebin armout wpid wid waiter wident hook armpid i newwatcher
+  dir=$(make_case arm-race-mid-decision)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  sleep 300 &
+  wpid=$!
+  wid=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$wpid") || fail "could not identify stub watcher pid"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$wpid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$wid" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  sleep 300 &
+  waiter=$!
+  wident=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$waiter") || fail "could not identify waiter pid"
+  printf '%s\nidentity=%s\nharness=%s\nwatcher-pid=%s\nwatcher-identity=%s\n' \
+    "$waiter" "$wident" claude "$wpid" "$wid" > "$state/.watch-waiter"
+  hook="$dir/decision-hook"
+  cat > "$hook" <<SH
+#!/usr/bin/env bash
+rm -rf "$state/.watch.lock"
+SH
+  chmod +x "$hook"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ARM_HARNESS=claude FM_ARM_DECISION_TEST_HOOK="$hook" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 120 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    grep -qF 'already armed' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! grep -qF 'already armed' "$armout" || fail "arm stood down as already-armed while the watcher ended mid-decision: $(cat "$armout")"
+  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not take over by starting a fresh watcher: $(cat "$armout")"
+  newwatcher=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  kill "$armpid" "$newwatcher" "$wpid" "$waiter" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  wait "$wpid" 2>/dev/null || true
+  wait "$waiter" 2>/dev/null || true
+  pass "a watcher that ends while a new arm is deciding makes the arm take over, not stand down"
+}
+
+test_watcher_releases_home_lock_before_emitting_wake() {
+  # The invariant the arm's already-armed fast exit depends on: a watcher that
+  # just fired is no longer the healthy lock holder. wake() must release the home
+  # lock BEFORE emitting the wake, not only in its EXIT trap. Source the watcher
+  # functions, hold the lock as the watcher would, gate until ready, then fire a
+  # wake whose reason exceeds the pipe buffer so echo blocks with no reader: the
+  # lock must already be gone while the blocked echo keeps the process alive.
+  local dir state fifo acquired gate subpid i held
+  dir=$(make_case watch-wake-release)
+  state="$dir/state"
+  fifo="$dir/wake.fifo"
+  acquired="$dir/acquired"
+  gate="$dir/gate"
+  mkfifo "$fifo"
+  # Open the FIFO read-write on a parent fd so the subshell's stdout open never
+  # blocks waiting for a reader, and nothing drains it until we are ready.
+  exec 8<>"$fifo"
+  (
+    export FM_STATE_OVERRIDE="$state" FM_HOME="$dir"
+    # shellcheck disable=SC1090
+    . "$WATCH"
+    fm_lock_try_acquire "$WATCH_LOCK" || exit 9
+    : > "$acquired"
+    while [ ! -e "$gate" ]; do sleep 0.01; done
+    wake "$(head -c 200000 /dev/zero | tr '\0' x)"
+  ) >&8 &
+  subpid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$acquired" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$acquired" ] || { kill "$subpid" 2>/dev/null; exec 8>&-; fail "sourced watcher did not acquire the home lock"; }
+  [ -e "$state/.watch.lock" ] || { kill "$subpid" 2>/dev/null; exec 8>&-; fail "home lock not held after acquire"; }
+  : > "$gate"
+  i=0
+  while [ "$i" -lt 100 ] && [ -e "$state/.watch.lock" ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  held=present
+  [ -e "$state/.watch.lock" ] || held=released
+  exec 8>&-
+  cat "$fifo" >/dev/null &
+  wait "$subpid" 2>/dev/null || true
+  [ "$held" = released ] || fail "watcher still held the home lock while emitting the wake"
+  pass "watcher releases the home lock before emitting the wake"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse
@@ -1135,6 +1281,9 @@ test_arm_attaches_and_waits_for_live_fresh_watcher
 test_arm_singleton_second_rearm_is_instant_and_leaves_one_waiter
 test_arm_singleton_ignores_recycled_waiter_marker
 test_arm_singleton_hands_over_after_waiter_death
+test_arm_already_armed_requires_waiter_attached_to_the_live_watcher
+test_arm_takes_over_when_watcher_ends_mid_decision
+test_watcher_releases_home_lock_before_emitting_wake
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_reaps_abandoned_cycle_lock_owner_dirs

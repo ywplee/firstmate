@@ -105,10 +105,14 @@ waiter_lock_acquire() {
 WAITER_PID=
 WAITER_IDENTITY=
 WAITER_HARNESS=
+WAITER_WATCHER_PID=
+WAITER_WATCHER_IDENTITY=
 read_waiter_marker() {
   WAITER_PID=
   WAITER_IDENTITY=
   WAITER_HARNESS=
+  WAITER_WATCHER_PID=
+  WAITER_WATCHER_IDENTITY=
   [ -f "$WAITER_MARKER" ] || return 1
   local line number=0
   while IFS= read -r line || [ -n "$line" ]; do
@@ -117,32 +121,48 @@ read_waiter_marker() {
       1) WAITER_PID=$line ;;
       2) case "$line" in identity=*) WAITER_IDENTITY=${line#identity=} ;; esac ;;
       3) case "$line" in harness=*) WAITER_HARNESS=${line#harness=} ;; esac ;;
+      4) case "$line" in watcher-pid=*) WAITER_WATCHER_PID=${line#watcher-pid=} ;; esac ;;
+      5) case "$line" in watcher-identity=*) WAITER_WATCHER_IDENTITY=${line#watcher-identity=} ;; esac ;;
     esac
   done < "$WAITER_MARKER"
   [ -n "$WAITER_PID" ]
 }
 
 waiter_marker_is_live() {
-  local current
+  local current lock_identity
   read_waiter_marker || return 1
   [ "$WAITER_HARNESS" = "$ARM_HARNESS" ] || return 1
   [ "$WAITER_PID" != "$ARM_PID" ] || return 1
   [ -n "$WAITER_IDENTITY" ] || return 1
   fm_pid_alive "$WAITER_PID" || return 1
   current=$(fm_pid_identity "$WAITER_PID" 2>/dev/null || true)
-  [ -n "$current" ] && [ "$current" = "$WAITER_IDENTITY" ]
+  [ -n "$current" ] && [ "$current" = "$WAITER_IDENTITY" ] || return 1
+  [ -n "$WAITER_WATCHER_PID" ] && [ "$WAITER_WATCHER_PID" = "$HEALTHY_PID" ] || return 1
+  [ -n "$WAITER_WATCHER_IDENTITY" ] || return 1
+  lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
+  [ -n "$lock_identity" ] && [ "$lock_identity" = "$WAITER_WATCHER_IDENTITY" ]
 }
 
 write_waiter_marker() {
-  local identity tmp
+  local identity tmp watcher_pid watcher_identity
   identity=$(fm_pid_identity "$ARM_PID" 2>/dev/null || true)
+  watcher_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  watcher_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
   tmp="$WAITER_MARKER.tmp.$ARM_PID"
   {
     printf '%s\n' "$ARM_PID"
     [ -n "$identity" ] && printf 'identity=%s\n' "$identity"
     printf 'harness=%s\n' "$ARM_HARNESS"
+    [ -n "$watcher_pid" ] && printf 'watcher-pid=%s\n' "$watcher_pid"
+    [ -n "$watcher_identity" ] && printf 'watcher-identity=%s\n' "$watcher_identity"
   } > "$tmp" 2>/dev/null && mv -f "$tmp" "$WAITER_MARKER" 2>/dev/null
   rm -f "$tmp" 2>/dev/null || true
+}
+
+run_decision_test_hook() {
+  [ -n "${FM_ARM_DECISION_TEST_HOOK:-}" ] || return 0
+  [ -x "$FM_ARM_DECISION_TEST_HOOK" ] || return 0
+  "$FM_ARM_DECISION_TEST_HOOK" >/dev/null 2>&1 || true
 }
 
 FAST_EXIT_WAITER_PID=
@@ -150,9 +170,12 @@ claim_waiter_or_already_armed() {
   FAST_EXIT_WAITER_PID=
   waiter_lock_acquire || return 1
   if healthy_watcher && waiter_marker_is_live; then
-    FAST_EXIT_WAITER_PID=$WAITER_PID
-    fm_lock_release "$WAITER_LOCK"
-    return 0
+    run_decision_test_hook
+    if healthy_watcher && waiter_marker_is_live; then
+      FAST_EXIT_WAITER_PID=$WAITER_PID
+      fm_lock_release "$WAITER_LOCK"
+      return 0
+    fi
   fi
   write_waiter_marker
   fm_lock_release "$WAITER_LOCK"
@@ -360,6 +383,7 @@ wait_for_healthy_successor() {
 }
 
 fail_unexplained_cycle() {
+  clear_waiter_marker_if_mine
   echo "watcher: FAILED - cycle ended without an actionable reason"
   return 1
 }
@@ -369,11 +393,13 @@ fail_unexplained_cycle() {
 # clean empty completion that an adapter could mistake for a no-op.
 attach_and_wait() {
   local attached_pid=$1
+  register_waiter
   while :; do
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ]; then
         cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
         attached_pid=$HEALTHY_PID
+        register_waiter
         cycle_begin "$attached_pid" attached
         report_attached
       fi
@@ -383,6 +409,7 @@ attach_and_wait() {
     if wait_for_healthy_successor; then
       cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"
       attached_pid=$HEALTHY_PID
+      register_waiter
       cycle_begin "$attached_pid" attached
       report_attached
       continue
@@ -525,6 +552,7 @@ owned_child_finished() {
   signal=$(cycle_signal_name "$rc")
   if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
     reason_type=$(watch_output_reason_type "$child_out")
+    clear_waiter_marker_if_mine
     cycle_log_append "$rc" "$signal" "$reason_type" none
     print_watch_output "$child_out"
     rm -f "$child_out" 2>/dev/null || true
@@ -557,6 +585,7 @@ owned_child_finished() {
 
   reason_type="nonzero-exit"
   [ "$signal" = none ] || reason_type="signal-exit"
+  clear_waiter_marker_if_mine
   cycle_log_append "$rc" "$signal" "$reason_type" none
   print_watch_output "$child_out"
   if ! grep -q '^watcher: FAILED' "$child_out" 2>/dev/null; then
