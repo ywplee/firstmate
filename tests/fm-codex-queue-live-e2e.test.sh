@@ -2,7 +2,7 @@
 # Opt-in native Codex queue proof on one disposable daemon and exact task pane.
 set -eu
 if [ "${FM_CODEX_QUEUE_LIVE_E2E:-0}" != 1 ]; then
-  printf 'skip - set FM_CODEX_QUEUE_LIVE_E2E=1 with explicit personal CLI/daemon binaries and source account home\n'
+  printf 'skip: set FM_CODEX_QUEUE_LIVE_E2E=1 with explicit personal CLI/daemon binaries and source account home\n'
   exit 0
 fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

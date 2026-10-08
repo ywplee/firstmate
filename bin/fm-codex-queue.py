@@ -56,18 +56,21 @@ def digest(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest() if hasattr(hashlib, 'file_digest') else hashlib.sha256(stream.read()).hexdigest()
 
 
-def save(path, value):
+def replace_text(path, text):
     fd, tmp = tempfile.mkstemp(prefix=path.name + '.', dir=path.parent)
     try:
         with os.fdopen(fd, 'w') as stream:
-            json.dump(value, stream, sort_keys=True)
-            stream.write('\n')
+            stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+
+
+def save(path, value):
+    replace_text(path, json.dumps(value, sort_keys=True) + '\n')
 
 
 def lock_owner(state):
@@ -196,7 +199,7 @@ def reconcile(state, data, pending, path):
     current = buf.read_text() if buf.exists() else ''
     prefix = pending['buffer']
     if current.startswith(prefix):
-        buf.write_text(current[len(prefix):])
+        replace_text(buf, current[len(prefix):])
         if not buf.stat().st_size:
             (state / '.subsuper-escalations.since').unlink(missing_ok=True)
             (state / '.subsuper-inject-wedged').unlink(missing_ok=True)
@@ -220,6 +223,19 @@ def flush(state, data):
         if pending['binding'] != data:
             raise ValueError('pending submission belongs to an earlier owner; manual reconciliation required')
         return reconcile(state, data, pending, path)
+    script = '. "$1/fm-wake-lib.sh"; fm_lock_try_acquire "$2" || exit 1; trap \'fm_lock_release "$2"\' EXIT; printf "locked\\n"; read -r release'
+    with subprocess.Popen(['bash', '-c', script, '_', str(CODE), str(state / '.afk-return-catchup.lock')],
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) as lock:
+        try:
+            if lock.stdout.readline() != 'locked\n':
+                return False
+            return submit(state, data, path)
+        finally:
+            lock.stdin.close()
+            lock.wait(timeout=5)
+
+
+def submit(state, data, path):
     if not (state / '.afk').exists() or (state / '.afk-return-catchup').exists():
         return False
     owner = state / '.supervise-daemon.lock'

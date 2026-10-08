@@ -135,6 +135,10 @@ try:
     target=json.loads((home/'state/.codex-queue-target.json').read_text())
     thread=target['thread']
     env.update(FM_SUPERVISOR_BACKEND='codex-queue',FM_SUPERVISOR_TARGET=thread,FM_ESCALATE_BATCH_SECS='0',FM_HOUSEKEEPING_TICK='1',FM_POLL='1',FM_HEARTBEAT='999999',FM_MAX_DEFER_SECS='5')
+    daemon_entry = scratch / 'daemon-entry.sh'
+    daemon_entry.write_text('#!/bin/sh\nexec env ' + shlex.join([key + '=' + env[key] for key in ['PATH','FM_ESCALATE_BATCH_SECS','FM_HOUSEKEEPING_TICK','FM_POLL','FM_HEARTBEAT','FM_MAX_DEFER_SECS','FM_WEDGE_ALARM_EXEC','FM_GATE_REFUSE_BYPASS','ASDF_PYTHON_VERSION'] if key in env]) + ' ' + shlex.quote(str(root / 'bin/fm-afk-start.sh')) + '\n')
+    daemon_entry.chmod(0o700)
+    env['FM_AFK_LAUNCH_ENTRY'] = str(daemon_entry)
     bindings.update(thread=thread,target=target)
     (evidence/'bindings.json').write_text(json.dumps(bindings,indent=2))
     launch()
