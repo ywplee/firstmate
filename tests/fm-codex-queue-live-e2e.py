@@ -96,9 +96,7 @@ def launch():
 def marker(kind):
     (home / ('handled-' + kind)).unlink(missing_ok=True)
     message = 'Harmless fixture event ' + kind + ': use a shell to append exactly HANDLED_' + kind + ' and a newline to handled-' + kind + ' in this directory; perform no other work; finish with exactly FINAL_' + kind
-    with (home / 'state/.subsuper-escalations').open('a') as stream:
-        stream.write(message + '\n')
-    (home / 'state/.subsuper-escalations.since').write_text(str(int(time.time())))
+    command(['bash', '-c', '. "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-supervise-daemon.sh"; escalate_add "$FM_HOME/state" "$2"', '_', str(root), message])
     return message
 
 

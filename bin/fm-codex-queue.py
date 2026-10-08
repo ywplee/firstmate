@@ -13,6 +13,7 @@ completion before removing the corresponding escalation-buffer prefix.
 Acceptance and ambiguous exits never mean handling, and are never blindly
 resent. Receipts and pending submissions survive supervisor restart and return.
 """
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -55,21 +56,39 @@ def digest(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest() if hasattr(hashlib, 'file_digest') else hashlib.sha256(stream.read()).hexdigest()
 
 
-def replace_text(path, text):
+def replace_text(path, text, retirement=None):
     fd, tmp = tempfile.mkstemp(prefix=path.name + '.', dir=path.parent)
     try:
         with os.fdopen(fd, 'w') as stream:
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
+        if retirement is not None:
+            os.link(tmp, tmp + '.identity')
+            os.replace(tmp + '.identity', retirement)
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+        if os.path.exists(tmp + '.identity'):
+            os.unlink(tmp + '.identity')
 
 
 def save(path, value):
     replace_text(path, json.dumps(value, sort_keys=True) + '\n')
+
+
+@contextmanager
+def state_lock(state, name, wait=True):
+    script = '. "$1/fm-wake-lib.sh"; "$3" "$2" || exit 1; trap \'fm_lock_release "$2"\' EXIT; printf "locked\\n"; read -r release'
+    acquire = 'fm_lock_acquire_wait' if wait else 'fm_lock_try_acquire'
+    with subprocess.Popen(['bash', '-c', script, '_', str(CODE), str(state / name), acquire],
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) as lock:
+        try:
+            yield lock.stdout.readline() == 'locked\n'
+        finally:
+            lock.stdin.close()
+            lock.wait(timeout=5)
 
 
 def lock_owner(state):
@@ -195,12 +214,17 @@ def reconcile(state, data, pending, path):
     buf = state / '.subsuper-escalations'
     receipts = state / '.codex-queue-receipts'
     retiring = receipts / (pending['id'] + '.buffer')
+    retired = receipts / (pending['id'] + '.retired-buffer')
     if not retiring.exists():
         raise ValueError('pending submission lacks buffer retirement identity; manual reconciliation required')
     current = buf.read_text() if buf.exists() else ''
     prefix = pending['buffer']
-    if current.startswith(prefix) and os.path.samefile(buf, retiring):
-        replace_text(buf, current[len(prefix):])
+    if buf.exists() and os.path.samefile(buf, retiring):
+        if not current.startswith(prefix):
+            raise ValueError('pending buffer prefix changed; manual reconciliation required')
+        replace_text(buf, current[len(prefix):], retired)
+    elif not buf.exists() or not retired.exists() or not os.path.samefile(buf, retired):
+        raise ValueError('pending buffer identity changed; manual reconciliation required')
     if buf.exists() and not buf.stat().st_size:
         (state / '.subsuper-escalations.since').unlink(missing_ok=True)
         (state / '.subsuper-inject-wedged').unlink(missing_ok=True)
@@ -211,27 +235,28 @@ def reconcile(state, data, pending, path):
 
 
 def flush(state, data):
-    path = state / '.codex-queue-pending.json'
     if not ancestor(data['owner']):
         supervisor = state / '.supervise-daemon.lock'
         supervisor_pid = int((supervisor / 'pid').read_text())
         if not ancestor(supervisor_pid) or identity(supervisor_pid) != (supervisor / 'pid-identity').read_text().strip():
             raise ValueError('only the coordinator or its supervisor may reconcile')
+    with state_lock(state, '.subsuper-escalations.lock') as acquired:
+        if not acquired:
+            return False
+        return flush_locked(state, data)
+
+
+def flush_locked(state, data):
+    path = state / '.codex-queue-pending.json'
     if path.exists():
         pending = json.loads(path.read_text())
         if pending['binding'] != data:
             raise ValueError('pending submission belongs to an earlier owner; manual reconciliation required')
         return reconcile(state, data, pending, path)
-    script = '. "$1/fm-wake-lib.sh"; fm_lock_try_acquire "$2" || exit 1; trap \'fm_lock_release "$2"\' EXIT; printf "locked\\n"; read -r release'
-    with subprocess.Popen(['bash', '-c', script, '_', str(CODE), str(state / '.afk-return-catchup.lock')],
-                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) as lock:
-        try:
-            if lock.stdout.readline() != 'locked\n':
-                return False
-            return submit(state, data, path)
-        finally:
-            lock.stdin.close()
-            lock.wait(timeout=5)
+    with state_lock(state, '.afk-return-catchup.lock', wait=False) as acquired:
+        if not acquired:
+            return False
+        return submit(state, data, path)
 
 
 def submit(state, data, path):

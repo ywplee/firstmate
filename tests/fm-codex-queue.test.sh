@@ -188,6 +188,98 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(json.loads(path.read_text()), pending)
         self.assertEqual((self.state / '.subsuper-escalations').read_text(), pending['buffer'])
 
+    def test_unexplained_buffer_identity_change_preserves_pending(self):
+        with self.accepted():
+            helper.flush(self.state, self.data)
+        path = self.state / '.codex-queue-pending.json'
+        pending = json.loads(path.read_text())
+        self.handle(pending['message'])
+        buf = self.state / '.subsuper-escalations'
+        helper.replace_text(buf, pending['buffer'])
+        with self.accepted() as command:
+            with self.assertRaisesRegex(ValueError, 'buffer identity changed'):
+                helper.flush(self.state, self.data)
+            self.assertEqual(command.call_count, 0)
+        self.assertEqual(json.loads(path.read_text()), pending)
+        self.assertEqual(buf.read_text(), pending['buffer'])
+        buf.unlink()
+        with self.assertRaisesRegex(ValueError, 'buffer identity changed'):
+            helper.flush(self.state, self.data)
+        self.assertEqual(json.loads(path.read_text()), pending)
+
+    def failed_launch_preserves_identity(self, mode):
+        with self.accepted():
+            helper.flush(self.state, self.data)
+        path = self.state / '.codex-queue-pending.json'
+        pending = json.loads(path.read_text())
+        helper.save(self.state / '.codex-queue-target.json', self.data)
+        buf = self.state / '.subsuper-escalations'
+        (self.state / '.subsuper-escalations.since').write_text('123')
+        (self.state / '.subsuper-inject-wedged').write_text('wedge')
+        before = {name: (self.state / name).stat().st_ino for name in ['.subsuper-escalations', '.subsuper-escalations.since', '.subsuper-inject-wedged']}
+        script = '''
+. "$1/bin/fm-afk-launch.sh"
+. "$1/bin/fm-supervise-daemon.sh"
+discover_supervisor_target() { printf '%s' exact-test-target; }
+discover_supervisor_backend() { printf '%s' codex-queue; }
+python3() { return 0; }
+daemon_lock_held_by_live_daemon() { return 1; }
+fm_afk_launch_reconcile() { return 0; }
+fail_launch() { escalate_add "$FM_AFK_LAUNCH_STATE" 'new event'; return 1; }
+fm_afk_launch_create_tmux() { fail_launch; }
+fm_afk_launch_record_write() { fail_launch; }
+FM_SUPERVISOR_BACKEND=codex-queue
+if "$2"; then exit 1; fi
+'''
+        subprocess.run(['bash', '-c', script, '_', str(root), mode], check=True)
+        self.assertEqual({name: (self.state / name).stat().st_ino for name in before}, before)
+        self.assertEqual(buf.read_text(), 'decision event\nnew event\n')
+        self.assertEqual((self.state / '.subsuper-escalations.since').read_text(), '123')
+        self.assertEqual((self.state / '.subsuper-inject-wedged').read_text(), 'wedge')
+        self.assertEqual(json.loads(path.read_text()), pending)
+        self.handle(pending['message'])
+        with self.accepted() as command:
+            self.assertTrue(helper.flush(self.state, self.data))
+            self.assertEqual(command.call_count, 0)
+        self.assertEqual(buf.read_text(), 'new event\n')
+
+    def test_failed_native_queue_launch_preserves_delivery_identity(self):
+        self.failed_launch_preserves_identity('fm_afk_launch_start')
+
+    def test_failed_tracked_native_launch_preserves_delivery_identity(self):
+        self.failed_launch_preserves_identity('fm_afk_launch_start_native')
+
+    def test_supervisor_append_waits_for_coordinator_retirement(self):
+        with self.accepted():
+            helper.flush(self.state, self.data)
+        pending = json.loads((self.state / '.codex-queue-pending.json').read_text())
+        self.handle(pending['message'])
+        buf = self.state / '.subsuper-escalations'
+        replace = helper.replace_text
+        appenders = []
+        def concurrent_append(destination, text, retirement=None):
+            if destination == buf:
+                script = '. "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-supervise-daemon.sh"; printf "ready\\n"; escalate_add "$2" "new event"'
+                appender = subprocess.Popen(['bash', '-c', script, '_', str(root), str(self.state)], env=dict(os.environ, FM_SUPERVISOR_BACKEND='codex-queue'), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                appenders.append(appender)
+                self.assertEqual(appender.stdout.readline(), 'ready\n')
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    appender.wait(timeout=0.3)
+            return replace(destination, text, retirement)
+        try:
+            with patch.object(helper, 'replace_text', side_effect=concurrent_append):
+                self.assertTrue(helper.flush(self.state, self.data))
+            self.assertEqual(len(appenders), 1)
+            out, err = appenders[0].communicate(timeout=5)
+            self.assertEqual(appenders[0].returncode, 0, err)
+            self.assertEqual(buf.read_text(), 'new event\n')
+            self.assertTrue((self.state / '.subsuper-escalations.since').exists())
+        finally:
+            for appender in appenders:
+                if appender.poll() is None:
+                    appender.terminate()
+                appender.communicate(timeout=5)
+
     def test_return_cannot_begin_between_journal_and_submission(self):
         real_run = subprocess.run
         gate = self.state / '.afk-return-catchup'

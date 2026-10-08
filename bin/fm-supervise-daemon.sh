@@ -611,12 +611,17 @@ stale_window_is_busy() {  # <window> <state>
     | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
 }
 
-escalate_add() {  # <state> <distilled-item>
-  local state=$1 item=$2 buf
+escalate_add() (  # <state> <distilled-item>
+  local state=$1 item=$2 buf lock
   buf="$state/.subsuper-escalations"
+  if [ "${FM_SUPERVISOR_BACKEND:-}" = codex-queue ]; then
+    lock="$state/.subsuper-escalations.lock"
+    fm_lock_acquire_wait "$lock" || return 1
+    trap 'fm_lock_release "$lock"' EXIT
+  fi
   [ -s "$buf" ] || _now > "${buf}.since"
   printf '%s\n' "$item" >> "$buf"
-}
+)
 
 # Flush the escalation buffer as ONE batched, single-line digest to the
 # supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on

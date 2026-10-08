@@ -59,9 +59,13 @@ fm_afk_start_usage() {
 # lifecycle" and bin/fm-supervise-daemon.sh's escalate_add/inject_wedge_alarm).
 # NOT called on a refresh (daemon already alive), so the current session's own
 # buffered escalations are preserved.
+fm_afk_has_native_delivery() {
+  [ -e "$1/.codex-queue-pending.json" ] || [ -e "$1/.codex-queue-target.json" ]
+}
+
 fm_afk_clear_stale_artifacts() {  # <state-dir>
   local state=$1
-  [ ! -e "$state/.codex-queue-pending.json" ] && [ ! -e "$state/.codex-queue-target.json" ] || return 0
+  fm_afk_has_native_delivery "$state" && return 0
   rm -f "$state/.subsuper-escalations" \
         "$state/.subsuper-escalations.since" \
         "$state/.subsuper-inject-wedged" 2>/dev/null
