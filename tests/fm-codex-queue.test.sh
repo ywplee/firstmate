@@ -7,7 +7,6 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import shlex
 import socket
 import subprocess
 import sys
@@ -20,7 +19,7 @@ helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
 root = Path(sys.argv.pop())
 sys.path.insert(0, str(root / 'tests'))
-from fm_codex_queue_live_assertions import assert_busy_order
+from fm_codex_queue_live_assertions import assert_busy_order, assert_restart_recovery
 
 class QueueTests(unittest.TestCase):
     def setUp(self):
@@ -402,24 +401,33 @@ class RemoteBindingTests(unittest.TestCase):
             mock.start()
             self.addCleanup(mock.stop)
 
-    def bind(self, command):
-        responses = {
-            ('ps', '-p', '11', '-o', 'comm='): str(self.daemon),
-            ('ps', '-p', '11', '-o', 'command='): str(self.daemon) + ' app-server --managed-daemon',
-            ('ps', '-p', '22', '-o', 'comm='): str(self.cli),
-            ('ps', '-p', '22', '-o', 'command='): command,
-            (str(self.cli), '--no-daemon', '--version'): 'codex-cli 0.160.1',
-            (str(self.daemon), '--no-daemon', '--version'): 'codex-cli 0.161.0',
-        }
-        with patch.object(helper, 'run', side_effect=lambda argv: responses[tuple(argv)]):
-            return helper.bind(self.home, self.account, self.state, self.thread)
+    def bind(self, arguments):
+        argv = [sys.executable, '-c', 'import sys; print("ready", flush=True); sys.stdin.read()'] + arguments
+        with subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) as process:
+            try:
+                self.assertEqual(process.stdout.readline(), 'ready\n')
+                self.assertEqual(helper.process_args(process.pid)[-len(arguments):], arguments)
+                cli_pid = str(process.pid)
+                responses = {
+                    ('ps', '-p', '11', '-o', 'comm='): str(self.daemon),
+                    ('ps', '-p', '11', '-o', 'command='): str(self.daemon) + ' app-server --managed-daemon',
+                    ('ps', '-p', cli_pid, '-o', 'comm='): str(self.cli),
+                    ('ps', '-p', cli_pid, '-o', 'command='): subprocess.check_output(['ps', '-p', cli_pid, '-o', 'command='], text=True),
+                    (str(self.cli), '--no-daemon', '--version'): 'codex-cli 0.160.1',
+                    (str(self.daemon), '--no-daemon', '--version'): 'codex-cli 0.161.0',
+                }
+                with patch.dict(os.environ, FM_CODEX_QUEUE_CLI_PID=cli_pid), patch.object(helper, 'run', side_effect=lambda argv: responses[tuple(argv)]):
+                    return helper.bind(self.home, self.account, self.state, self.thread)
+            finally:
+                process.stdin.close()
+                process.wait(timeout=5)
 
     def test_wrong_complete_remote_refuses_with_or_without_socket_selection(self):
         for selected in ['', str(self.endpoint)]:
             for remote in ['unix://', 'unix://' + str(self.endpoint) + '.other', 'unix://' + str(self.home / 'other')]:
                 with self.subTest(selected=selected, remote=remote), patch.dict(os.environ, FM_CODEX_QUEUE_SOCKET=selected):
                     with self.assertRaisesRegex(ValueError, 'exact daemon socket'):
-                        self.bind(shlex.join([str(self.cli), '--remote', remote]))
+                        self.bind(['--remote', remote])
                     self.assertFalse((self.state / '.codex-queue-target.json').exists())
 
     def test_exact_remote_binds_discovered_socket_and_canonical_alias(self):
@@ -427,16 +435,54 @@ class RemoteBindingTests(unittest.TestCase):
         alias.symlink_to(self.endpoint)
         for remote in [self.endpoint, alias]:
             with self.subTest(remote=remote):
-                data = self.bind(shlex.join([str(self.cli), '--remote', 'unix://' + str(remote)]))
+                data = self.bind(['--remote', 'unix://' + str(remote), "Bind this home's native queue", '', '--remote unix://prompt-only'])
                 self.assertEqual(data['socket'], str(self.endpoint))
-                self.assertEqual(data['cli_pid'], 22)
+                self.assertGreater(data['cli_pid'], 0)
                 self.assertEqual(json.loads((self.state / '.codex-queue-target.json').read_text()), data)
+                (self.state / '.codex-queue-target.json').unlink()
 
     def test_remote_text_inside_prompt_cannot_bind_wrong_cli(self):
-        command = shlex.join([str(self.cli), '--remote', 'unix://' + str(self.home / 'other'), '--', '--remote unix://' + str(self.endpoint)])
+        arguments = ['--remote', 'unix://' + str(self.home / 'other'), '--', '--remote unix://' + str(self.endpoint)]
         with self.assertRaisesRegex(ValueError, 'exact daemon socket'):
-            self.bind(command)
+            self.bind(arguments)
         self.assertFalse((self.state / '.codex-queue-target.json').exists())
+
+class RestartRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.pending = {'id': 'original', 'message': 'exact original input', 'buffer': 'original event\n', 'acceptance': 'accepted'}
+        self.original = dict(self.pending, handled={'turn': 'original-turn'})
+        self.later = {'id': 'later', 'message': 'exact later input', 'buffer': 'later event\n', 'handled': {'turn': 'later-turn'}}
+        self.items = []
+        for receipt in [self.original, self.later]:
+            turn = receipt['handled']['turn']
+            self.items.extend([
+                {'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': turn}},
+                {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'content': [{'text': receipt['message']}], 'internal_chat_message_metadata_passthrough': {'turn_id': turn}}},
+                {'type': 'event_msg', 'payload': {'type': 'task_complete', 'turn_id': turn}},
+            ])
+
+    def assert_recovery(self, receipts=None, items=None):
+        return assert_restart_recovery(self.items if items is None else items, self.pending, 'later event', [self.original, self.later] if receipts is None else receipts)
+
+    def test_original_acknowledgement_and_later_event_survive_restart(self):
+        proof = self.assert_recovery()
+        self.assertEqual(proof, {'pending_id': 'original', 'original_turn': 'original-turn', 'later_id': 'later', 'later_turn': 'later-turn'})
+
+    def test_blind_resubmission_or_replaced_original_receipt_refuses(self):
+        retry = dict(self.original, id='retry', message='retried original input')
+        for receipts in [[self.original, retry, self.later], [retry, self.later]]:
+            with self.subTest(receipts=receipts), self.assertRaisesRegex(ValueError, 'one exact acknowledgement'):
+                self.assert_recovery(receipts=receipts)
+
+    def test_duplicate_native_input_refuses(self):
+        with self.assertRaisesRegex(ValueError, 'one exact native input'):
+            self.assert_recovery(items=self.items + [self.items[1]])
+
+    def test_missing_later_event_or_original_completion_refuses(self):
+        with self.assertRaisesRegex(ValueError, 'later buffered event'):
+            self.assert_recovery(receipts=[self.original])
+        with self.assertRaisesRegex(ValueError, 'started and completed'):
+            self.assert_recovery(items=[item for index, item in enumerate(self.items) if index != 2])
 
 class TurnOrderTests(unittest.TestCase):
     def setUp(self):

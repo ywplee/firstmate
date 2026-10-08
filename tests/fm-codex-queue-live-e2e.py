@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from fm_codex_queue_live_assertions import assert_busy_order
+from fm_codex_queue_live_assertions import assert_busy_order, assert_restart_recovery
 
 root = Path(sys.argv[1]).resolve()
 evidence = Path(os.environ['FM_CODEX_QUEUE_LIVE_EVIDENCE']).resolve()
@@ -155,27 +155,45 @@ try:
     if not any(draft in line and ('›' in line or '❯' in line) for line in capture.splitlines()[-8:]):
         raise RuntimeError('draft absent from current composer after native delivery')
     command(['tmux','send-keys','-t',pane,'C-u'])
-    busy='Use one shell command to write BUSY_START to busy-start, sleep 8, then write BUSY_END to busy-end. Do no other work. Finish with exactly BUSY_FINAL.'
+    busy='Run exactly this shell command: printf BUSY_START > busy-start; for attempt in $(seq 1 300); do [ -f busy-release ] && break; sleep 0.2; done; test -f busy-release && printf BUSY_END > busy-end. Do no other work. Finish with exactly BUSY_FINAL.'
     command(['tmux','send-keys','-t',pane,'-l',busy])
     time.sleep(0.3)
     command(['tmux','send-keys','-t',pane,'Enter'])
     wait(lambda:(home/'busy-start').exists(),'busy tool start')
     busy_event = marker('busy')
-    time.sleep(1)
+    pending_path = home / 'state/.codex-queue-pending.json'
+    def accepted_busy():
+        if not pending_path.exists():
+            return None
+        pending = json.loads(pending_path.read_text())
+        return pending if pending.get('acceptance') == 'accepted' and busy_event in pending['buffer'].splitlines() else None
+    restart_pending = wait(accepted_busy, 'accepted unreconciled busy submission')
     if (home/'handled-busy').exists():
         raise RuntimeError('native queue interrupted the busy turn')
+    command([str(root/'bin/fm-afk-launch.sh'),'stop'])
+    if not pending_path.exists() or json.loads(pending_path.read_text()) != restart_pending:
+        raise RuntimeError('restart must retain the accepted unreconciled submission')
+    later_event = marker('restart')
+    buffered = (home / 'state/.subsuper-escalations').read_text()
+    if not buffered.startswith(restart_pending['buffer']) or later_event not in buffered[len(restart_pending['buffer']):].splitlines():
+        raise RuntimeError('later event was not buffered behind the pending submission')
+    (evidence / 'restart-pending.json').write_text(json.dumps(restart_pending, indent=2))
+    (evidence / 'restart-buffer.txt').write_text(buffered)
+    (home / 'busy-release').write_text('release')
+    wait(lambda:final('FINAL_busy'), 'original queued turn completes while supervision is stopped')
+    if not pending_path.exists() or json.loads(pending_path.read_text()) != restart_pending:
+        raise RuntimeError('pending delivery was reconciled before supervisor restart')
+    launch()
     handled('busy')
+    handled('restart')
     if not (home/'busy-end').exists():
         raise RuntimeError('busy ordering was not preserved')
-    busy_receipts = [json.loads(path.read_text()) for path in (home / 'state/.codex-queue-receipts').glob('*.json')]
-    busy_receipts = [receipt for receipt in busy_receipts if busy_event in receipt['buffer'].splitlines()]
+    receipts = [json.loads(path.read_text()) for path in (home / 'state/.codex-queue-receipts').glob('*.json')]
+    bindings['restart_recovery'] = assert_restart_recovery(native_events(), restart_pending, later_event, receipts)
+    busy_receipts = [receipt for receipt in receipts if busy_event in receipt['buffer'].splitlines()]
     if len(busy_receipts) != 1:
         raise RuntimeError('busy event lacks one exact handling receipt')
     bindings['busy_order'] = assert_busy_order(native_events(), busy, busy_receipts[0])
-    command([str(root/'bin/fm-afk-launch.sh'),'stop'])
-    marker('restart')
-    launch()
-    handled('restart')
     command([str(root/'bin/fm-afk-return.sh')])
     if (home/'state/.afk').exists() or (home/'state/.supervise-daemon.lock').exists():
         raise RuntimeError('orderly return left supervision active')

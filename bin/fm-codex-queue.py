@@ -14,11 +14,11 @@ Acceptance and ambiguous exits never mean handling, and are never blindly
 resent. Receipts and pending submissions survive supervisor restart and return.
 """
 from contextlib import contextmanager
+import ctypes
 import hashlib
 import json
 import os
 from pathlib import Path
-import shlex
 import stat
 import subprocess
 import sys
@@ -39,6 +39,33 @@ def identity(pid):
 
 def parent(pid):
     return int(run(['ps', '-p', str(pid), '-o', 'ppid=']))
+
+
+def process_args(pid):
+    if sys.platform == 'linux':
+        raw = Path('/proc') / str(pid) / 'cmdline'
+        return [os.fsdecode(arg) for arg in raw.read_bytes().split(b'\0')[:-1]]
+    if sys.platform != 'darwin':
+        raise ValueError('native process arguments are unavailable on this OS')
+    sysctl = ctypes.CDLL(None, use_errno=True).sysctl
+    sysctl.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+                      ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t]
+    sysctl.restype = ctypes.c_int
+    mib = (ctypes.c_int * 3)(1, 49, pid)
+    size = ctypes.c_size_t()
+    if sysctl(mib, 3, None, ctypes.byref(size), None, 0):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    buf = ctypes.create_string_buffer(size.value)
+    if sysctl(mib, 3, buf, ctypes.byref(size), None, 0):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    argc = ctypes.c_int.from_buffer_copy(buf).value
+    executable, separator, raw = buf.raw[ctypes.sizeof(ctypes.c_int):size.value].partition(b'\0')
+    args = raw.lstrip(b'\0').split(b'\0')
+    if not executable or not separator or argc < 1 or len(args) <= argc:
+        raise ValueError('native process arguments are incomplete')
+    return [os.fsdecode(arg) for arg in args[:argc]]
 
 
 def ancestor(pid):
@@ -156,7 +183,7 @@ def bind(home, account, state, thread):
     if socket_path is None or str(socket_path) not in available:
         raise ValueError('owner socket is absent or ambiguous; select its exact Unix path')
     if cli_pid != parent(owner):
-        cli_args = shlex.split(run(['ps', '-p', str(cli_pid), '-o', 'command=']))
+        cli_args = process_args(cli_pid)
         remotes = [cli_args[index + 1] for index, argument in enumerate(cli_args[:-1]) if argument == '--remote']
         if len(remotes) != 1 or not remotes[0].startswith('unix:///') or Path(remotes[0][7:]).resolve() != socket_path:
             raise ValueError('explicit-remote CLI is not attached to the exact daemon socket')
