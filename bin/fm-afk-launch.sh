@@ -582,7 +582,7 @@ fm_afk_launch_start_native() {
 }
 
 fm_afk_launch_stop() {
-  local pid pid_identity current_identity result=0 read_result
+  local pid owner pid_identity current_identity result=0 read_result
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
@@ -592,14 +592,18 @@ fm_afk_launch_stop() {
   # (1) SIGTERM the daemon so its cleanup trap flushes buffered escalations
   # WHILE state/.afk is still present (the exit-ordering fix: clearing .afk
   # first would make that flush a no-op via inject_msg's presence gate).
-  pid=""
+  pid=$(daemon_lock_pid 2>/dev/null || true)
   pid_identity=""
-  if daemon_lock_held_by_live_daemon; then
-    pid=$(daemon_lock_pid 2>/dev/null) || return 1
-    pid_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  owner=$(daemon_lock_owner 2>/dev/null || true)
+  if [ -n "$owner" ] && fm_pid_alive "$pid" && daemon_pid_matches "$pid" "$owner"; then
+    pid_identity=$(fm_pid_identity "$pid" 2>/dev/null) || {
+      fm_pid_alive "$pid" && return 1
+      pid=""
+    }
   fi
+  [ -n "$pid_identity" ] || pid=""
   if [ -n "$pid" ]; then
-    if ! kill -TERM "$pid" 2>/dev/null; then
+    if ! kill -TERM "$pid" 2>/dev/null && fm_pid_alive "$pid"; then
       fm_afk_launch_log "failed to signal away-mode daemon pid=$pid"
       result=1
     fi

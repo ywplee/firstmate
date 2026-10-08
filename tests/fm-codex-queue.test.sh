@@ -523,6 +523,15 @@ if "$2"; then exit 1; fi
 
 class ShutdownTests(unittest.TestCase):
     def test_normal_stop_during_default_grace(self):
+        self.normal_stop_during_default_grace(False)
+
+    def test_normal_stop_during_daemon_lock_retirement(self):
+        self.normal_stop_during_default_grace(True)
+
+    def test_normal_stop_during_daemon_cleanup(self):
+        self.normal_stop_during_default_grace(False, True)
+
+    def normal_stop_during_default_grace(self, retire_before_pid_read, interrupt_cleanup=False):
         with tempfile.TemporaryDirectory(dir=root) as directory:
             home = Path(directory)
             state = home / 'state'
@@ -566,7 +575,18 @@ class ShutdownTests(unittest.TestCase):
                 for name in ['FM_STATE_OVERRIDE', 'FM_ROOT_OVERRIDE', 'FM_SIGNAL_GRACE']:
                     env.pop(name, None)
                 watcher_pid = child = None
-                with subprocess.Popen(['bash', str(root / 'bin/fm-supervise-daemon.sh')], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as daemon:
+                daemon_argv = ['bash', str(root / 'bin/fm-supervise-daemon.sh')]
+                if interrupt_cleanup:
+                    daemon_script = '''
+. "$1/bin/fm-supervise-daemon.sh"
+wedge_alarm_stop_active_notifier() {
+  : > "$FM_HOME/cleanup-entered"
+  while [ ! -f "$FM_HOME/cleanup-release" ]; do sleep 0.02; done
+}
+fm_super_main
+'''
+                    daemon_argv = ['bash', '-c', daemon_script, '_', str(root)]
+                with subprocess.Popen(daemon_argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as daemon:
                     reaper = threading.Thread(target=daemon.wait)
                     reaper.start()
                     try:
@@ -587,13 +607,52 @@ class ShutdownTests(unittest.TestCase):
                                         break
                             time.sleep(0.02)
                         self.assertIsNotNone(child, 'supervisor watcher did not enter default grace')
-                        (home / 'slow-check').touch()
+                        if interrupt_cleanup:
+                            script = '''
+. "$1/bin/fm-afk-launch.sh"
+kill() {
+  if [ "$1" = -TERM ]; then
+    for attempt in $(seq 1 100); do
+      [ -f "$FM_HOME/cleanup-entered" ] && break
+      sleep 0.02
+    done
+    command kill "$@"
+    : > "$FM_HOME/cleanup-release"
+  else
+    command kill "$@"
+  fi
+}
+fm_afk_launch_main stop-normal
+'''
+                            argv = ['bash', '-c', script, '_', str(root)]
+                        elif retire_before_pid_read:
+                            script = '''
+. "$1/bin/fm-afk-launch.sh"
+daemon_lock_pid() {
+  : > "$FM_HOME/pid-read-entered"
+  for attempt in $(seq 1 100); do
+    [ -e "$FM_AFK_LOCK" ] || break
+    sleep 0.02
+  done
+  ( . "$FM_AFK_LAUNCH_DIR/fm-afk-start.sh"; daemon_lock_pid )
+}
+fm_afk_launch_main stop-normal
+'''
+                            argv = ['bash', '-c', script, '_', str(root)]
+                        else:
+                            (home / 'slow-check').touch()
+                            argv = ['bash', str(root / 'bin/fm-afk-launch.sh'), 'stop-normal']
                         started = time.monotonic()
-                        result = subprocess.run(['bash', str(root / 'bin/fm-afk-launch.sh'), 'stop-normal'], env=env, capture_output=True, text=True, timeout=20)
+                        result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=20)
                         elapsed = time.monotonic() - started
+                        if retire_before_pid_read:
+                            self.assertTrue((home / 'pid-read-entered').exists())
                         self.assertEqual(result.returncode, 0, result.stderr)
                         self.assertLess(elapsed, 10, result.stderr)
-                        daemon.wait(timeout=2)
+                        self.assertEqual(daemon.wait(timeout=2), 0)
+                        if interrupt_cleanup:
+                            self.assertTrue((home / 'cleanup-entered').exists())
+                            self.assertTrue((home / 'cleanup-release').exists())
                         for pid in [watcher_pid, child]:
                             with self.assertRaises(ProcessLookupError):
                                 os.kill(pid, 0)
@@ -604,6 +663,7 @@ class ShutdownTests(unittest.TestCase):
                         self.assertEqual((state / '.subsuper-escalations').read_text().splitlines()[:2], ['accepted event', 'later event'])
                         print('normal stop seconds:', elapsed)
                     finally:
+                        (home / 'cleanup-release').touch()
                         (home / 'slow-check').unlink(missing_ok=True)
                         for pid in [daemon.pid, watcher_pid, child]:
                             if pid:

@@ -1409,7 +1409,7 @@ fm_super_main() {
   # --- shutdown: flush buffered escalations, reap child, release lock -------
   local WATCHER_PID="" CUR_TMP=""
   cleanup() {
-    trap - TERM INT
+    trap '' TERM INT
     wedge_alarm_stop_active_notifier
     if [ "$BACKEND" != codex-queue ] || afk_active "$STATE" || [ -e "$STATE/.codex-queue-normal.json" ]; then
       escalate_flush "$STATE" 2>/dev/null || true
