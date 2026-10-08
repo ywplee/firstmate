@@ -1411,7 +1411,9 @@ fm_super_main() {
   cleanup() {
     trap - TERM INT
     wedge_alarm_stop_active_notifier
-    escalate_flush "$STATE" 2>/dev/null || true
+    if [ "$BACKEND" != codex-queue ] || afk_active "$STATE" || [ -e "$STATE/.codex-queue-normal.json" ]; then
+      escalate_flush "$STATE" 2>/dev/null || true
+    fi
     if [ -n "${WATCHER_PID:-}" ]; then
       kill "$WATCHER_PID" 2>/dev/null || true
       wait "$WATCHER_PID" 2>/dev/null || true
@@ -1454,6 +1456,9 @@ fm_super_main() {
 
   local rc reason
   while true; do
+    if [ "$BACKEND" = codex-queue ] && ! afk_active "$STATE" && [ ! -e "$STATE/.codex-queue-normal.json" ]; then
+      cleanup
+    fi
     # --- pane-gone guard (preserved) ---------------------------------------
     # With the #29 watcher's enqueue-before-suppress, a wake is no longer
     # swallowed by running the watcher with no injection target. We still back

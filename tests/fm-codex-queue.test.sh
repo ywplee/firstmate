@@ -16,6 +16,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -519,6 +520,100 @@ if "$2"; then exit 1; fi
             sock.bind(str(endpoint))
             endpoint.chmod(0o600)
             self.assertNotEqual(original, helper.socket_identity(endpoint))
+
+class ShutdownTests(unittest.TestCase):
+    def test_normal_stop_during_default_grace(self):
+        with tempfile.TemporaryDirectory(dir=root) as directory:
+            home = Path(directory)
+            state = home / 'state'
+            state.mkdir()
+            account = home / 'account'
+            (account / 'sessions').mkdir(parents=True)
+            thread = '12345678-1234-1234-1234-123456789abc'
+            rollout = account / 'sessions' / (thread + '.jsonl')
+            rollout.write_text(json.dumps({'type': 'session_meta', 'payload': {'id': thread, 'cwd': str(home)}}) + '\n' + json.dumps({'type': 'turn_context', 'payload': {'approval_policy': 'never', 'sandbox_policy': {'type': 'danger-full-access'}}}) + '\n')
+            endpoint = home / 's'
+            with socket.socket(socket.AF_UNIX) as sock:
+                previous = Path.cwd()
+                try:
+                    os.chdir(home)
+                    sock.bind('s')
+                finally:
+                    os.chdir(previous)
+                endpoint.chmod(0o600)
+                identity = subprocess.check_output(['bash', '-c', '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"', '_', str(root), str(os.getpid())], text=True).strip()
+                (state / '.lock').write_text(str(os.getpid()) + '\nidentity=' + identity + '\n')
+                binary = Path(sys.executable).resolve()
+                data = dict(home=str(home), account=str(account), thread=thread, owner=os.getpid(), owner_identity=identity, cli_pid=os.getpid(), cli_identity=identity, binary=str(binary), daemon=str(binary), binary_hash=helper.digest(binary), daemon_hash=helper.digest(binary), socket=str(endpoint), socket_identity=helper.socket_identity(endpoint), rollout=str(rollout))
+                helper.save(state / '.codex-queue-target.json', data)
+                helper.save(state / '.codex-queue-normal.json', data)
+                pending = dict(id='preserved', binding=data, buffer='accepted event\n', message='accepted input', submitted=time.time(), acceptance='accepted')
+                helper.save(state / '.codex-queue-pending.json', pending)
+                (state / '.subsuper-escalations').write_text(pending['buffer'] + 'later event\n')
+                (state / '.subsuper-escalations.since').write_text(str(int(time.time())))
+                (state / '.afk-daemon-terminal').write_text('none\t-\tnative\n')
+                status = state / 'worker.status'
+                status.write_text('blocked: harmless shutdown fixture\n')
+                fakebin = home / 'fakebin'
+                fakebin.mkdir()
+                lsof = fakebin / 'lsof'
+                lsof.write_text('#!/bin/sh\n[ ! -f "$FM_HOME/slow-check" ] || sleep 4.5\nprintf "n%s/s\\n" "$FM_HOME"\n')
+                lsof.chmod(0o700)
+                tmux = fakebin / 'tmux'
+                tmux.write_text('#!/bin/sh\nexit 0\n')
+                tmux.chmod(0o700)
+                env = dict(os.environ, PATH=str(fakebin) + ':' + os.environ['PATH'], FM_HOME=str(home), FM_SUPERVISOR_BACKEND='codex-queue', FM_SUPERVISOR_TARGET=thread, FM_POLL='1', FM_CHECK_INTERVAL='999999', FM_HEARTBEAT='999999', FM_WEDGE_ALARM_EXEC='discard')
+                for name in ['FM_STATE_OVERRIDE', 'FM_ROOT_OVERRIDE', 'FM_SIGNAL_GRACE']:
+                    env.pop(name, None)
+                watcher_pid = child = None
+                with subprocess.Popen(['bash', str(root / 'bin/fm-supervise-daemon.sh')], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as daemon:
+                    reaper = threading.Thread(target=daemon.wait)
+                    reaper.start()
+                    try:
+                        deadline = time.monotonic() + 15
+                        while time.monotonic() < deadline and child is None:
+                            lock = state / '.watch.lock/pid'
+                            recorded = lock.read_text().strip() if lock.exists() else ''
+                            if recorded:
+                                watcher_pid = int(recorded)
+                                children = subprocess.run(['pgrep', '-P', str(watcher_pid)], capture_output=True, text=True).stdout.split()
+                                for value in children:
+                                    try:
+                                        args = helper.process_args(int(value))
+                                    except OSError:
+                                        continue
+                                    if len(args) == 2 and Path(args[0]).name == 'sleep' and args[1] == '30':
+                                        child = int(value)
+                                        break
+                            time.sleep(0.02)
+                        self.assertIsNotNone(child, 'supervisor watcher did not enter default grace')
+                        (home / 'slow-check').touch()
+                        started = time.monotonic()
+                        result = subprocess.run(['bash', str(root / 'bin/fm-afk-launch.sh'), 'stop-normal'], env=env, capture_output=True, text=True, timeout=20)
+                        elapsed = time.monotonic() - started
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertLess(elapsed, 10, result.stderr)
+                        daemon.wait(timeout=2)
+                        for pid in [watcher_pid, child]:
+                            with self.assertRaises(ProcessLookupError):
+                                os.kill(pid, 0)
+                        for name in ['.watch.lock', '.supervise-daemon.lock', '.codex-queue-normal.json', '.afk-daemon-terminal', '.afk']:
+                            self.assertFalse((state / name).exists(), name)
+                        self.assertEqual(status.read_text(), 'blocked: harmless shutdown fixture\n')
+                        self.assertEqual(json.loads((state / '.codex-queue-pending.json').read_text()), pending)
+                        self.assertEqual((state / '.subsuper-escalations').read_text().splitlines()[:2], ['accepted event', 'later event'])
+                        print('normal stop seconds:', elapsed)
+                    finally:
+                        (home / 'slow-check').unlink(missing_ok=True)
+                        for pid in [daemon.pid, watcher_pid, child]:
+                            if pid:
+                                try:
+                                    os.kill(pid, signal.SIGTERM)
+                                except ProcessLookupError:
+                                    pass
+                        daemon.wait(timeout=5)
+                        reaper.join(timeout=2)
+                        daemon.communicate()
 
 class RemoteBindingTests(unittest.TestCase):
     def setUp(self):
