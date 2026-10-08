@@ -197,11 +197,12 @@ cat > "$TMP_ROOT/trust-fixture/bin/tmux" <<'MOCK'
 #!/usr/bin/env bash
 shift 2
 case "$1" in
+  display-message) printf '%s\n' "$FM_TEST_PANE_PID" ;;
   capture-pane) printf '%s\n' 'Trust this folder?' ;;
   send-keys)
+    printf '%s\n' "${*: -1}" >> "$FM_TEST_TRUST_KEYS"
     if [ "${*: -1}" = Enter ]; then
-      printf '%s\n' Enter >> "$FM_TEST_TRUST_KEYS"
-      [ "$(wc -l < "$FM_TEST_TRUST_KEYS")" -eq 1 ] || exit 1
+      [ "$(wc -l < "$FM_TEST_TRUST_KEYS")" -eq 2 ] || exit 1
     fi
     ;;
 esac
@@ -213,9 +214,9 @@ cat > "$TMP_ROOT/trust-fixture/bin/codex" <<'MOCK'
 printf '%s\n' 'codex test fixture'
 MOCK
 chmod +x "$TMP_ROOT/trust-fixture/bin/"*
-if out=$(PATH="$TMP_ROOT/trust-fixture/bin:$PATH" TMPDIR="$TMP_ROOT/trust-fixture/tmp" FM_CODEX_SUPERVISOR_EVIDENCE="$TMP_ROOT/trust-fixture/evidence" FM_CODEX_SUPERVISOR_LIVE_E2E=1 bash "$ROOT/tests/fm-codex-supervisor-live-e2e.test.sh" 2>&1); then
+if out=$(PATH="$TMP_ROOT/trust-fixture/bin:$PATH" TMPDIR="$TMP_ROOT/trust-fixture/tmp" FM_CODEX_SUPERVISOR_SCRATCH="$TMP_ROOT/trust-fixture/home" FM_CODEX_SUPERVISOR_EVIDENCE="$TMP_ROOT/trust-fixture/evidence" FM_CODEX_LIVE_DEADLINE="$(($(date +%s) + 300))" FM_CODEX_SUPERVISOR_LIVE_E2E=1 bash "$ROOT/tests/fm-codex-supervisor-live-e2e.test.sh" 2>&1); then
   fail 'live fixture accepted an unexpected directory trust prompt'
 fi
-assert_contains "$out" 'new directory trust prompt requires stopping verification' 'live fixture did not explain its trust refusal'
-[ "$(wc -l < "$FM_TEST_TRUST_KEYS")" -eq 1 ] || fail 'live fixture sent an approval to the directory trust dialog'
+assert_contains "$out" 'new trust/login prompt requires stopping verification' 'live fixture did not explain its trust refusal'
+[ "$(wc -l < "$FM_TEST_TRUST_KEYS")" -eq 2 ] && [ "$(tail -n 1 "$FM_TEST_TRUST_KEYS")" = Enter ] || fail 'live fixture sent an approval to the directory trust dialog'
 pass 'live fixture stops on a new directory trust prompt without sending approval'

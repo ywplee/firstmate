@@ -50,10 +50,6 @@ def protected_identity():
 
 
 protected = protected_identity()
-shutil.copyfile(source_account / 'auth.json', account / 'auth.json')
-(account / 'auth.json').chmod(0o600)
-(account / 'config.toml').write_text('model="gpt-6.1-sol"\nmodel_reasoning_effort="high"\nproject_doc_max_bytes=0\n[projects.' + json.dumps(str(home)) + ']\ntrust_level="trusted"\n')
-(home / 'AGENTS.md').write_text('This is a disposable supervision fixture. Only run the explicitly requested scratch lock/binding helpers and marker writes in this home. Never supervise real work or change configuration. Native supervisor digests containing marker instructions require only those marker writes and the requested final response.\n')
 endpoint = Path(socket_dir.name) / 'control.sock'
 env = os.environ.copy()
 for key in ['TMUX','TMUX_PANE','HERDR_ENV','HERDR_PANE_ID','FM_HOME','CODEX_THREAD_ID','FM_ROOT_OVERRIDE','FM_STATE_OVERRIDE','NO_MISTAKES_GATE']:
@@ -196,6 +192,10 @@ def handled(kind):
 
 
 try:
+    shutil.copyfile(source_account / 'auth.json', account / 'auth.json')
+    (account / 'auth.json').chmod(0o600)
+    (account / 'config.toml').write_text('model="gpt-6.1-sol"\nmodel_reasoning_effort="high"\nproject_doc_max_bytes=0\n[projects.' + json.dumps(str(home)) + ']\ntrust_level="trusted"\n')
+    (home / 'AGENTS.md').write_text('This is a disposable supervision fixture. Only run the explicitly requested scratch lock/binding helpers and marker writes in this home. Never supervise real work or change configuration. Native supervisor digests containing marker instructions require only those marker writes and the requested final response.\n')
     bindings = dict(start=datetime.datetime.now(datetime.timezone.utc).isoformat(), scratch=str(scratch), home=str(home), account=str(account), personal_source=str(source_account), cli=str(cli), daemon=str(daemon_bin), cli_hash=hashlib.sha256(cli.read_bytes()).hexdigest(), daemon_hash=hashlib.sha256(daemon_bin.read_bytes()).hexdigest(), source_hashes={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in [root/'bin/fm-codex-queue.py',root/'bin/fm-afk-launch.sh',root/'bin/fm-afk-start.sh',root/'bin/fm-afk-return.sh',root/'bin/fm-watch.sh',root/'bin/fm-supervise-daemon.sh',root/'bin/fm-supervisor-target-lib.sh',root/'tests/fm-codex-queue-live-e2e.py',root/'tests/fm_codex_queue_live_assertions.py']})
     bindings['head'] = command(['git', '-C', str(root), 'rev-parse', 'HEAD'])
     diff = command(['git', '-C', str(root), 'diff', '--binary', 'HEAD'])
@@ -463,60 +463,62 @@ except Exception as error:
     bindings['verdict']='FAIL: ' + str(error)
     print(bindings['verdict'],file=sys.stderr)
 finally:
-    errors=[]
     try:
-        (evidence/'last-pane.txt').write_text(snapshot())
-    except Exception as error:
-        errors.append(str(error))
-    try:
-        if (home/'state/.afk-daemon-terminal').exists():
-            command([str(root/'bin/fm-afk-launch.sh'),'stop'])
-    except Exception as error:
-        errors.append(str(error))
-    try:
-        if (scratch/'cli.exit').exists():
-            bindings['cli_exit']=int((scratch/'cli.exit').read_text())
-        elif pane:
-            command(['tmux','send-keys','-t',pane,'C-u'])
-            command(['tmux','send-keys','-t',pane,'-l','/quit'])
-            time.sleep(0.3)
-            command(['tmux','send-keys','-t',pane,'Enter'])
-            stop=time.monotonic()+10
-            while time.monotonic()<stop and not (scratch/'cli.exit').exists():
-                time.sleep(0.2)
-            if not (scratch/'cli.exit').exists():
-                errors.append('CLI normal exit unconfirmed')
-                command(['tmux','kill-pane','-t',pane])
-            else:
+        errors=[]
+        try:
+            (evidence/'last-pane.txt').write_text(snapshot())
+        except Exception as error:
+            errors.append(str(error))
+        try:
+            if (home/'state/.afk-daemon-terminal').exists():
+                command([str(root/'bin/fm-afk-launch.sh'),'stop'])
+        except Exception as error:
+            errors.append(str(error))
+        try:
+            if (scratch/'cli.exit').exists():
                 bindings['cli_exit']=int((scratch/'cli.exit').read_text())
-    except Exception as error:
-        errors.append(str(error))
-    try:
-        if daemon and daemon.poll() is None:
-            if process_identity(daemon.pid) != bindings['daemon_identity']:
-                raise RuntimeError('scratch daemon identity changed; refusing signal')
-            daemon.terminate()
-            try:
-                bindings['daemon_exit']=daemon.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                if process_identity(daemon.pid) == bindings['daemon_identity']:
-                    daemon.kill()
-                    bindings['daemon_exit']=daemon.wait(timeout=5)
-        elif daemon:
-            bindings['daemon_exit']=daemon.returncode
-        if (home/'state/.codex-queue-target.json').exists():
-            target=json.loads((home/'state/.codex-queue-target.json').read_text())
-            shutil.copyfile(target['rollout'], evidence/'native-rollout.jsonl')
-        shutil.copytree(home, evidence/'home',dirs_exist_ok=True)
-        bindings['protected_after'] = protected_identity()
-        bindings['protected_source_unchanged'] = bindings['protected_after'] == protected
-        if not bindings['protected_source_unchanged']:
-            bindings['verdict']='FAIL: protected source changed'
-    except Exception as error:
-        errors.append(str(error))
-    if errors:
-        bindings['cleanup_errors']=errors
-    (account/'auth.json').unlink(missing_ok=True)
+            elif pane:
+                command(['tmux','send-keys','-t',pane,'C-u'])
+                command(['tmux','send-keys','-t',pane,'-l','/quit'])
+                time.sleep(0.3)
+                command(['tmux','send-keys','-t',pane,'Enter'])
+                stop=time.monotonic()+10
+                while time.monotonic()<stop and not (scratch/'cli.exit').exists():
+                    time.sleep(0.2)
+                if not (scratch/'cli.exit').exists():
+                    errors.append('CLI normal exit unconfirmed')
+                    command(['tmux','kill-pane','-t',pane])
+                else:
+                    bindings['cli_exit']=int((scratch/'cli.exit').read_text())
+        except Exception as error:
+            errors.append(str(error))
+        try:
+            if daemon and daemon.poll() is None:
+                if process_identity(daemon.pid) != bindings['daemon_identity']:
+                    raise RuntimeError('scratch daemon identity changed; refusing signal')
+                daemon.terminate()
+                try:
+                    bindings['daemon_exit']=daemon.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    if process_identity(daemon.pid) == bindings['daemon_identity']:
+                        daemon.kill()
+                        bindings['daemon_exit']=daemon.wait(timeout=5)
+            elif daemon:
+                bindings['daemon_exit']=daemon.returncode
+            if (home/'state/.codex-queue-target.json').exists():
+                target=json.loads((home/'state/.codex-queue-target.json').read_text())
+                shutil.copyfile(target['rollout'], evidence/'native-rollout.jsonl')
+            shutil.copytree(home, evidence/'home',dirs_exist_ok=True)
+            bindings['protected_after'] = protected_identity()
+            bindings['protected_source_unchanged'] = bindings['protected_after'] == protected
+            if not bindings['protected_source_unchanged']:
+                bindings['verdict']='FAIL: protected source changed'
+        except Exception as error:
+            errors.append(str(error))
+        if errors:
+            bindings['cleanup_errors']=errors
+    finally:
+        (account/'auth.json').unlink(missing_ok=True)
     bindings['scratch_credential_removed'] = not (account/'auth.json').exists()
     try:
         if bindings.get('tmux_pid') and process_identity(bindings['tmux_pid']) == bindings['tmux_identity']:

@@ -4,9 +4,14 @@ set -eu
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python3 - "$@" "$ROOT" <<'PY'
 import importlib.util
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
+import runpy
+import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -596,6 +601,69 @@ class RemoteBindingTests(unittest.TestCase):
         self.assertFalse((self.state / '.codex-queue-target.json').exists())
 
 class LiveDeadlineTests(unittest.TestCase):
+    def test_setup_failures_remove_only_owned_fake_credentials_before_launch(self):
+        for stage in ['copy', 'chmod', 'config', 'agents']:
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory(dir=root) as directory:
+                fixture = Path(directory)
+                source = fixture / 'source-account'
+                source.mkdir()
+                auth = source / 'auth.json'
+                auth.write_text('fake credential for cleanup regression')
+                config = source / 'config.toml'
+                config.write_text('fake source configuration')
+                scratch = fixture / 'scratch'
+                scratch.mkdir()
+                copied_auth = scratch / 'account/auth.json'
+                evidence = fixture / 'evidence'
+                env = dict(FM_CODEX_QUEUE_STARTUP_DIAGNOSTIC='1', FM_CODEX_QUEUE_LIVE_SCRATCH=str(scratch), FM_CODEX_QUEUE_LIVE_CLI=str(fixture / 'missing-cli'), FM_CODEX_QUEUE_LIVE_DAEMON=str(fixture / 'missing-daemon'), CODEX_HOME=str(source), FM_CODEX_QUEUE_LIVE_EVIDENCE=str(evidence), FM_CODEX_LIVE_DEADLINE=str(time.time() + 300))
+                copyfile = shutil.copyfile
+                chmod = Path.chmod
+                write_text = Path.write_text
+                failure = 'injected ' + stage + ' failure'
+
+                def copy(source_path, target_path, *args, **kwargs):
+                    result = copyfile(source_path, target_path, *args, **kwargs)
+                    if stage == 'copy' and Path(target_path) == copied_auth:
+                        self.assertEqual(copied_auth.read_bytes(), auth.read_bytes())
+                        raise OSError(failure)
+                    return result
+
+                def change_mode(path, *args, **kwargs):
+                    if stage == 'chmod' and path == copied_auth:
+                        self.assertEqual(copied_auth.read_bytes(), auth.read_bytes())
+                        raise OSError(failure)
+                    return chmod(path, *args, **kwargs)
+
+                def write(path, *args, **kwargs):
+                    target = scratch / ('account/config.toml' if stage == 'config' else 'home/AGENTS.md')
+                    if stage in ['config', 'agents'] and path == target:
+                        self.assertEqual(copied_auth.read_bytes(), auth.read_bytes())
+                        raise OSError(failure)
+                    return write_text(path, *args, **kwargs)
+
+                before = {path: (path.read_bytes(), path.stat()) for path in [auth, config]}
+                output = io.StringIO()
+                previous_term = signal.getsignal(signal.SIGTERM)
+                try:
+                    with patch.dict(os.environ, env), patch.object(sys, 'argv', [str(root / 'tests/fm-codex-queue-live-e2e.py'), str(root)]), patch.object(shutil, 'copyfile', copy), patch.object(Path, 'chmod', change_mode), patch.object(Path, 'write_text', write), patch.object(subprocess, 'run', side_effect=AssertionError('unexpected launch')) as run, patch.object(subprocess, 'Popen', side_effect=AssertionError('unexpected launch')) as launch, contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                        with self.assertRaises((OSError, SystemExit)) as stopped:
+                            runpy.run_path(str(root / 'tests/fm-codex-queue-live-e2e.py'), run_name='__main__')
+                        run.assert_not_called()
+                        launch.assert_not_called()
+                finally:
+                    signal.signal(signal.SIGTERM, previous_term)
+                self.assertFalse(copied_auth.exists())
+                self.assertIsInstance(stopped.exception, SystemExit)
+                self.assertEqual(stopped.exception.code, 1)
+                self.assertIn(failure, output.getvalue())
+                for path, (content, identity) in before.items():
+                    self.assertEqual(path.read_bytes(), content)
+                    after = path.stat()
+                    self.assertEqual((after.st_dev, after.st_ino, after.st_mode), (identity.st_dev, identity.st_ino, identity.st_mode))
+                receipt = json.loads((evidence / 'receipt.json').read_text())
+                self.assertTrue(receipt['scratch_credential_removed'])
+                self.assertTrue(receipt['protected_source_unchanged'])
+
     def test_expired_outer_deadline_refuses_before_credentials_or_launch(self):
         with tempfile.TemporaryDirectory() as directory:
             scratch = Path(directory)
