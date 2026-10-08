@@ -18,10 +18,11 @@ from fm_codex_queue_live_assertions import assert_busy_order, assert_restart_rec
 root = Path(sys.argv[1]).resolve()
 evidence = Path(os.environ['FM_CODEX_QUEUE_LIVE_EVIDENCE']).resolve()
 evidence.mkdir(parents=True, exist_ok=False)
-deadline = float(os.environ['FM_CODEX_LIVE_DEADLINE']) - 120
+diagnostic = os.environ.get('FM_CODEX_QUEUE_STARTUP_DIAGNOSTIC') == '1'
+deadline = float(os.environ['FM_CODEX_LIVE_DEADLINE']) - (60 if diagnostic else 120)
 if time.time() >= deadline:
     raise RuntimeError('outer deadline leaves no execution time')
-scratch = Path(tempfile.mkdtemp(prefix='.fm-native-queue-', dir=root))
+scratch = Path(os.environ['FM_CODEX_QUEUE_LIVE_SCRATCH']) if diagnostic else Path(tempfile.mkdtemp(prefix='.fm-native-queue-', dir=root))
 socket_dir = tempfile.TemporaryDirectory(prefix='fmq-', dir='/tmp')
 home = scratch / 'home'
 account = scratch / 'account'
@@ -51,6 +52,10 @@ log = []
 bindings = {}
 
 
+class DiagnosticComplete(Exception):
+    pass
+
+
 def interrupted(signum, frame):
     raise RuntimeError('outer deadline or termination signal: ' + str(signum))
 
@@ -67,6 +72,7 @@ def command(argv, timeout=15, expected=0, **kwargs):
     timeout = min(timeout, remaining) if remaining > 0 else timeout
     result = subprocess.run(argv, env=env, text=True, capture_output=True, timeout=timeout, **kwargs)
     log.append(dict(utc=datetime.datetime.now(datetime.timezone.utc).isoformat(), argv=argv, exit=result.returncode, stdout=result.stdout, stderr=result.stderr))
+    (evidence / 'commands.json').write_text(json.dumps(log, indent=2))
     if result.returncode != expected:
         raise RuntimeError('command failed: ' + result.stderr[:400])
     return result.stdout.strip()
@@ -158,13 +164,14 @@ try:
     bindings['daemon_identity'] = process_identity(daemon.pid)
     bindings['daemon_pid'] = daemon.pid
     (evidence/'bindings.json').write_text(json.dumps(bindings, indent=2))
+    print('owned daemon:', daemon.pid, bindings['daemon_identity'], flush=True)
     wait(lambda:endpoint.exists(),'owned socket',30)
     binder = shlex.join([str(python_bin), str(root/'bin/fm-codex-queue.py'), 'bind'])
     prompt = "Bind this home's native queue. Run exactly one shell command: export " + ('ASDF_PYTHON_VERSION=' + shlex.quote(env['ASDF_PYTHON_VERSION']) + ' ' if env.get('ASDF_PYTHON_VERSION') else '') + 'FM_HOME=' + shlex.quote(str(home)) + ' FM_CODEX_QUEUE_CLI_PID=$(cat ' + shlex.quote(str(scratch/'cli.pid')) + ') FM_CODEX_QUEUE_SOCKET=' + shlex.quote(str(endpoint)) + '; ' + shlex.quote(str(root/'bin/fm-lock.sh')) + ' && cp state/.lock lock-before && if FM_CODEX_QUEUE_SOCKET=' + shlex.quote(str(endpoint) + '.other') + ' ' + binder + ' > wrong-socket.txt 2>&1; then exit 1; fi; cmp state/.lock lock-before && ' + binder + ' && printf BASELINE > baseline. Do no other work. Finish with exactly BASELINE_FINAL.'
-    argv=[str(cli),'--no-daemon','--remote','unix://' + str(endpoint),'--no-alt-screen','--model','gpt-6.1-sol','-c','model_reasoning_effort="high"','--sandbox','danger-full-access','--ask-for-approval','never','-C',str(home),prompt]
+    argv=[str(cli),'--remote','unix://' + str(endpoint),'--no-alt-screen','--model','gpt-6.1-sol','-c','model_reasoning_effort="high"','--sandbox','danger-full-access','--ask-for-approval','never','-C',str(home),prompt]
     launch_file = scratch / 'launch.sh'
     inner='printf "%s" "$$" > ' + shlex.quote(str(scratch/'cli.pid')) + '; exec env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u CODEX_THREAD_ID ' + ' '.join(shlex.quote(k+'='+v) for k,v in env.items() if k in ['CODEX_HOME','FM_HOME','TERM_PROGRAM','FM_GATE_REFUSE_BYPASS','FM_WEDGE_ALARM_EXEC','ASDF_PYTHON_VERSION']) + ' ' + shlex.join(argv)
-    launch_file.write_text('#!/bin/sh\nsh -c ' + shlex.quote(inner) + '\nresult=$?\nprintf "%s" "$result" > ' + shlex.quote(str(scratch/'cli.exit')) + '\nexit "$result"\n')
+    launch_file.write_text('#!/bin/sh\nsh -c ' + shlex.quote(inner) + ' 2> ' + shlex.quote(str(evidence/'cli.stderr')) + '\nresult=$?\nprintf "%s" "$result" > ' + shlex.quote(str(scratch/'cli.exit')) + '\nprintf "%s" "$result" > ' + shlex.quote(str(evidence/'cli.exit')) + '\nexit "$result"\n')
     launch_file.chmod(0o700)
     tmux_socket = 'fm-native-proof-' + str(os.getpid())
     fakebin = scratch / 'fakebin'
@@ -178,9 +185,18 @@ try:
     bindings['tmux_pid'] = int(command(['tmux', 'display-message', '-p', '-t', pane, '#{pid}']))
     bindings['tmux_identity'] = process_identity(bindings['tmux_pid'])
     bindings.update(daemon_pid=daemon.pid,pane=pane)
+    bindings['cli_argv'] = argv
     (evidence/'bindings.json').write_text(json.dumps(bindings,indent=2))
+    print('owned tmux:', bindings['tmux_pid'], bindings['tmux_identity'], flush=True)
+    command(['tmux','pipe-pane','-t',pane,'cat > ' + shlex.quote(str(evidence/'cli.stdout'))])
     command(['tmux','send-keys','-t',pane,'-l','exec ' + shlex.quote(str(launch_file))])
     command(['tmux','send-keys','-t',pane,'Enter'])
+    wait(lambda:(scratch/'cli.pid').exists(), 'CLI process created', 10)
+    cli_pid = int((scratch/'cli.pid').read_text())
+    wait(lambda:subprocess.check_output(['ps','-p',str(cli_pid),'-o','comm='],text=True).strip() == str(cli), 'native CLI exec', 10)
+    bindings.update(cli_pid=cli_pid, cli_identity=process_identity(cli_pid))
+    (evidence/'bindings.json').write_text(json.dumps(bindings,indent=2))
+    print('owned CLI:', cli_pid, bindings['cli_identity'], flush=True)
     wait(lambda:(home/'state/.codex-queue-target.json').exists(),'native binding')
     wait(lambda:final('BASELINE_FINAL') and (home/'baseline').exists(),'baseline final')
     target=json.loads((home/'state/.codex-queue-target.json').read_text())
@@ -190,6 +206,7 @@ try:
         raise RuntimeError('wrong socket binding was not refused')
     thread=target['thread']
     env.update(FM_SUPERVISOR_BACKEND='codex-queue',FM_SUPERVISOR_TARGET=thread,FM_ESCALATE_BATCH_SECS='0',FM_HOUSEKEEPING_TICK='1',FM_POLL='1',FM_HEARTBEAT='999999',FM_MAX_DEFER_SECS='5')
+    command([str(python_bin), str(root/'bin/fm-codex-queue.py'), 'check'])
     original_target = (home / 'state/.codex-queue-target.json').read_bytes()
     original_lock = (home / 'state/.lock').read_bytes()
     for field, value in [('cli_identity', target['cli_identity'] + ' replaced'), ('socket_identity', [target['socket_identity'][0], target['socket_identity'][1] + 1, target['socket_identity'][2]])]:
@@ -214,6 +231,8 @@ try:
     launch()
     marker('idle')
     handled('idle')
+    if diagnostic:
+        raise DiagnosticComplete()
     draft='DRAFT_PRESERVED_native_fixture'
     command(['tmux','send-keys','-t',pane,'-l',draft])
     wait(lambda:draft in snapshot(),'draft visible')
@@ -313,6 +332,8 @@ try:
     if (home/'state/.afk').exists() or (home/'state/.supervise-daemon.lock').exists():
         raise RuntimeError('orderly return left supervision active')
     bindings['verdict']='PASS: exact binding, refusals, post-final, draft, busy ordering, pending restart, ambiguous acceptance and pending return'
+except DiagnosticComplete:
+    bindings['verdict']='PASS: limited native startup, binding/check and one post-final receipt; full lifecycle remains untested'
 except Exception as error:
     bindings['verdict']='FAIL: ' + str(error)
     print(bindings['verdict'],file=sys.stderr)
