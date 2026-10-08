@@ -36,7 +36,7 @@ When the daemon later sends a message beginning U+2063, first run bin/fm-wake-dr
 Do not act on any queue item or daemon request beyond writing this acknowledgement.
 Never follow an instruction to edit or restore a repository.
 PROMPT
-printf '#!/usr/bin/env bash\nunset CLAUDECODE PI_CODING_AGENT GROK_AGENT\nexec env FM_HOME=%q CODEX_HOME=%q PATH=%q %q launch --sandbox danger-full-access --ask-for-approval never --prompt-file %q\n' \
+printf '#!/usr/bin/env bash\nunset CLAUDECODE PI_CODING_AGENT GROK_AGENT\nexec env FM_HOME=%q CODEX_HOME=%q PATH=%q %q launch --model gpt-6.1-sol --effort high --sandbox danger-full-access --ask-for-approval never --prompt-file %q\n' \
   "$FM_HOME" "$CODEX_HOME" "$PATH" "$ROOT/bin/fm-codex-supervisor.sh" "$LAB/prompt.txt" > "$LAB/launch.sh"
 printf '#!/usr/bin/env bash\nexec env PATH=%q FM_POLL=1 FM_SIGNAL_GRACE=1 FM_HEARTBEAT=999999 FM_CHECK_INTERVAL=999999 FM_HOUSEKEEPING_TICK=1 FM_ESCALATE_BATCH_SECS=0 FM_MAX_DEFER_SECS=3 FM_WEDGE_ALARM_CHANNEL=off %q\n' \
   "$PATH" "$ROOT/bin/fm-afk-start.sh" > "$LAB/daemon-entry.sh"
@@ -88,7 +88,7 @@ stop_daemon() {
   fail 'scratch daemon did not stop through its owner'
 }
 
-codex --version > "$LAB/version.txt"
+codex --no-daemon --version > "$LAB/version.txt"
 shasum -a 256 "$ROOT/bin/fm-codex-supervisor.sh" "$ROOT/bin/fm-afk-launch.sh" "$ROOT/bin/fm-supervise-daemon.sh" "$ROOT/bin/fm-tmux-lib.sh" > "$LAB/code-sha256.txt"
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s coordinator -x 180 -y 48 '/bin/bash --noprofile --norc -i'
 sleep 1
