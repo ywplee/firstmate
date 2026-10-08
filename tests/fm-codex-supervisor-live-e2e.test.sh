@@ -62,15 +62,13 @@ wait_for_text() {
   fail "timed out waiting for $needle in $path (evidence $LAB)"
 }
 wait_idle() {
-  local trust_accepted=0
   for _ in $(seq 1 120); do
     capture > "$LAB/transcript.txt"
     if grep -F 'Killed: 9' "$LAB/transcript.txt" >/dev/null; then
       fail "Codex launch was killed before readiness (evidence $LAB)"
     fi
-    if [ "$trust_accepted" -eq 0 ] && grep -F 'Trust this folder?' "$LAB/transcript.txt" >/dev/null; then
-      "$REAL_TMUX" -L "$SOCKET" send-keys -t '%0' Enter
-      trust_accepted=1
+    if grep -F 'Trust this folder?' "$LAB/transcript.txt" >/dev/null; then
+      fail "new directory trust prompt requires stopping verification (evidence $LAB)"
     fi
     if [ -e "$FM_HOME/ready.txt" ] && grep -F '• SMOKE_IDLE' "$LAB/transcript.txt" >/dev/null; then return 0; fi
     sleep 1

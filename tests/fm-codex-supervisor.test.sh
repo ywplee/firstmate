@@ -190,3 +190,32 @@ pass 'preflight refuses inherited model or effort and reports the explicit perso
 printf '%s\nidentity=wrong-process\n' "$$" > "$FM_HOME/state/.lock"
 expect_refusal 'lock process identity differs' preflight
 pass 'shell ancestry and recycled process identity do not certify Codex readiness'
+
+mkdir -p "$TMP_ROOT/trust-fixture/bin" "$TMP_ROOT/trust-fixture/tmp" "$TMP_ROOT/trust-fixture/evidence"
+export FM_TEST_TRUST_KEYS="$TMP_ROOT/trust-fixture/keys"
+cat > "$TMP_ROOT/trust-fixture/bin/tmux" <<'MOCK'
+#!/usr/bin/env bash
+shift 2
+case "$1" in
+  capture-pane) printf '%s\n' 'Trust this folder?' ;;
+  send-keys)
+    if [ "${*: -1}" = Enter ]; then
+      printf '%s\n' Enter >> "$FM_TEST_TRUST_KEYS"
+      [ "$(wc -l < "$FM_TEST_TRUST_KEYS")" -eq 1 ] || exit 1
+    fi
+    ;;
+esac
+exit 0
+MOCK
+cat > "$TMP_ROOT/trust-fixture/bin/codex" <<'MOCK'
+#!/usr/bin/env bash
+[ "$1" = --no-daemon ] && [ "$2" = --version ] || exit 1
+printf '%s\n' 'codex test fixture'
+MOCK
+chmod +x "$TMP_ROOT/trust-fixture/bin/"*
+if out=$(PATH="$TMP_ROOT/trust-fixture/bin:$PATH" TMPDIR="$TMP_ROOT/trust-fixture/tmp" FM_CODEX_SUPERVISOR_EVIDENCE="$TMP_ROOT/trust-fixture/evidence" FM_CODEX_SUPERVISOR_LIVE_E2E=1 bash "$ROOT/tests/fm-codex-supervisor-live-e2e.test.sh" 2>&1); then
+  fail 'live fixture accepted an unexpected directory trust prompt'
+fi
+assert_contains "$out" 'new directory trust prompt requires stopping verification' 'live fixture did not explain its trust refusal'
+[ "$(wc -l < "$FM_TEST_TRUST_KEYS")" -eq 1 ] || fail 'live fixture sent an approval to the directory trust dialog'
+pass 'live fixture stops on a new directory trust prompt without sending approval'
