@@ -285,6 +285,12 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
       ;;
+    tests/fm-codex-queue-live-e2e.py)
+      printf '%s\n' __script__:fm-codex-queue-live-e2e.test.sh
+      ;;
+    tests/fm_codex_queue_live_assertions.py)
+      printf '%s\n' __script__:fm-codex-queue.test.sh __script__:fm-codex-queue-live-e2e.test.sh
+      ;;
     tests/*.test.sh)
       # A single test file change selects only that script via basename family
       # resolution in the caller; emit a marker family of __script__

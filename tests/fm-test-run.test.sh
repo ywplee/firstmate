@@ -99,6 +99,8 @@ init_changed_fixture_repo() {
     fm-captain-translation-contract.test.sh \
     fm-cd-pretool-check.test.sh \
     fm-daemon.test.sh \
+    fm-codex-queue.test.sh \
+    fm-codex-queue-live-e2e.test.sh \
     fm-backend-herdr-smoke.test.sh \
     fm-secondmate-safety.test.sh \
     fm-session-start.test.sh \
@@ -116,6 +118,8 @@ init_changed_fixture_repo() {
   done
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
+  : >"$repo/tests/fm-codex-queue-live-e2e.py"
+  : >"$repo/tests/fm_codex_queue_live_assertions.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .agents/skills/example/SKILL.md\n' >>"$repo/tests/fm-captain-translation-contract.test.sh"
@@ -153,6 +157,20 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-backend.test.sh" "eventwait test selects backend coverage"
   git -C "$repo" add tests/fm-backend-herdr-eventwait.test.py
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm eventwait-change
+
+  printf '\n' >>"$repo/tests/fm-codex-queue-live-e2e.py"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) || fail "native Python fixture is unmapped"
+  [ "$listed" = tests/fm-codex-queue-live-e2e.test.sh ] || fail "native Python fixture must select its shell owner: $listed"
+  git -C "$repo" add tests/fm-codex-queue-live-e2e.py
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm native-fixture-change
+
+  printf '\n' >>"$repo/tests/fm_codex_queue_live_assertions.py"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) || fail "native assertion helper is unmapped"
+  assert_contains "$listed" tests/fm-codex-queue.test.sh "native assertion helper selects deterministic coverage"
+  assert_contains "$listed" tests/fm-codex-queue-live-e2e.test.sh "native assertion helper selects live coverage"
+  [ "$(printf '%s\n' "$listed" | wc -l | tr -d ' ')" = 2 ] || fail "native assertion helper selected unrelated suites: $listed"
+  git -C "$repo" add tests/fm_codex_queue_live_assertions.py
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm native-assertions-change
 
   printf '\n' >>"$repo/bin/fm-supervisor-target-lib.sh"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)

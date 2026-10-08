@@ -7,6 +7,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
+import socket
 import subprocess
 import sys
 import tempfile
@@ -365,6 +367,76 @@ if "$2"; then exit 1; fi
             sock.bind(str(endpoint))
             endpoint.chmod(0o600)
             self.assertNotEqual(original, helper.socket_identity(endpoint))
+
+class RemoteBindingTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name).resolve()
+        self.account = self.home / 'account'
+        self.state = self.home / 'state'
+        self.state.mkdir()
+        (self.account / 'sessions').mkdir(parents=True)
+        self.thread = '12345678-1234-1234-1234-123456789abc'
+        records = [
+            {'type': 'session_meta', 'payload': {'id': self.thread, 'cwd': str(self.home)}},
+            {'type': 'turn_context', 'payload': {'approval_policy': 'never', 'sandbox_policy': {'type': 'danger-full-access'}}},
+        ]
+        (self.account / 'sessions' / (self.thread + '.jsonl')).write_text(''.join(json.dumps(item) + '\n' for item in records))
+        self.cli = self.home / 'cli'
+        self.daemon = self.home / 'daemon'
+        self.cli.write_text('cli')
+        self.daemon.write_text('daemon')
+        self.endpoint = self.home / 's'
+        sock = socket.socket(socket.AF_UNIX)
+        self.addCleanup(sock.close)
+        sock.bind(str(self.endpoint))
+        self.endpoint.chmod(0o600)
+        (self.state / '.lock').write_text('11\nidentity=identity\n')
+        env = patch.dict(os.environ, CODEX_THREAD_ID=self.thread, FM_CODEX_QUEUE_CLI_PID='22')
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop('FM_CODEX_QUEUE_SOCKET', None)
+        for name, value in [('identity', 'identity'), ('ancestor', True), ('parent', 33), ('sockets', [str(self.endpoint)])]:
+            mock = patch.object(helper, name, return_value=value)
+            mock.start()
+            self.addCleanup(mock.stop)
+
+    def bind(self, command):
+        responses = {
+            ('ps', '-p', '11', '-o', 'comm='): str(self.daemon),
+            ('ps', '-p', '11', '-o', 'command='): str(self.daemon) + ' app-server --managed-daemon',
+            ('ps', '-p', '22', '-o', 'comm='): str(self.cli),
+            ('ps', '-p', '22', '-o', 'command='): command,
+            (str(self.cli), '--no-daemon', '--version'): 'codex-cli 0.160.1',
+            (str(self.daemon), '--no-daemon', '--version'): 'codex-cli 0.161.0',
+        }
+        with patch.object(helper, 'run', side_effect=lambda argv: responses[tuple(argv)]):
+            return helper.bind(self.home, self.account, self.state, self.thread)
+
+    def test_wrong_complete_remote_refuses_with_or_without_socket_selection(self):
+        for selected in ['', str(self.endpoint)]:
+            for remote in ['unix://', 'unix://' + str(self.endpoint) + '.other', 'unix://' + str(self.home / 'other')]:
+                with self.subTest(selected=selected, remote=remote), patch.dict(os.environ, FM_CODEX_QUEUE_SOCKET=selected):
+                    with self.assertRaisesRegex(ValueError, 'exact daemon socket'):
+                        self.bind(shlex.join([str(self.cli), '--remote', remote]))
+                    self.assertFalse((self.state / '.codex-queue-target.json').exists())
+
+    def test_exact_remote_binds_discovered_socket_and_canonical_alias(self):
+        alias = self.home / 'alias'
+        alias.symlink_to(self.endpoint)
+        for remote in [self.endpoint, alias]:
+            with self.subTest(remote=remote):
+                data = self.bind(shlex.join([str(self.cli), '--remote', 'unix://' + str(remote)]))
+                self.assertEqual(data['socket'], str(self.endpoint))
+                self.assertEqual(data['cli_pid'], 22)
+                self.assertEqual(json.loads((self.state / '.codex-queue-target.json').read_text()), data)
+
+    def test_remote_text_inside_prompt_cannot_bind_wrong_cli(self):
+        command = shlex.join([str(self.cli), '--remote', 'unix://' + str(self.home / 'other'), '--', '--remote unix://' + str(self.endpoint)])
+        with self.assertRaisesRegex(ValueError, 'exact daemon socket'):
+            self.bind(command)
+        self.assertFalse((self.state / '.codex-queue-target.json').exists())
 
 class TurnOrderTests(unittest.TestCase):
     def setUp(self):

@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import stat
 import subprocess
 import sys
@@ -155,8 +156,9 @@ def bind(home, account, state, thread):
     if socket_path is None or str(socket_path) not in available:
         raise ValueError('owner socket is absent or ambiguous; select its exact Unix path')
     if cli_pid != parent(owner):
-        cli_args = run(['ps', '-p', str(cli_pid), '-o', 'command='])
-        if '--remote unix://' not in cli_args or not any('unix://' + candidate in cli_args for candidate in [str(socket_path), os.environ.get('FM_CODEX_QUEUE_SOCKET', '')]):
+        cli_args = shlex.split(run(['ps', '-p', str(cli_pid), '-o', 'command=']))
+        remotes = [cli_args[index + 1] for index, argument in enumerate(cli_args[:-1]) if argument == '--remote']
+        if len(remotes) != 1 or not remotes[0].startswith('unix:///') or Path(remotes[0][7:]).resolve() != socket_path:
             raise ValueError('explicit-remote CLI is not attached to the exact daemon socket')
     cli_version = run([str(binary), '--no-daemon', '--version'])
     daemon_version = run([str(daemon), '--no-daemon', '--version'])
