@@ -178,9 +178,9 @@ _event_cap_key=""
 _event_cap_ok=0
 _event_cap_fails=0
 
-# afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this
-# watcher and owns triage, so the watcher must behave one-shot (enqueue + exit on
-# every wake) and let the daemon classify - never absorb here, or the daemon's
+# When AFK or checked native normal ownership gives the daemon triage, this
+# watcher must behave one-shot (enqueue + exit on every wake) and let the daemon
+# classify - never absorb here, or the daemon's
 # digest/injection layer would never see the wake.
 afk_present() {
   [ -e "$STATE/.afk" ] && return 0

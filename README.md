@@ -71,8 +71,8 @@ Claude Code and Grok use background-notify wake cycles; Pi uses its tracked prim
 All three have verified turn-end guard paths when launched with their documented setup.
 Pick whichever one matches your subscription and workflow.
 
-Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
-For Codex native queue AFK supervision and the alternative terminal handoff, see [Codex supervision support](docs/codex-supervision-handoff.md).
+Codex and OpenCode are also verified and supported as primary harnesses; Codex defaults to bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
+For explicit Codex native queue normal and AFK ownership, the alternative terminal handoff, and current proof limits, see [Codex supervision support](docs/codex-supervision-handoff.md).
 
 ### Install and launch
 

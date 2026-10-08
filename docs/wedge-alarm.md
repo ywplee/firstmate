@@ -1,7 +1,7 @@
 # Away-mode injection wedge alarm - active alert channels
 
-The away-mode sub-supervisor (`bin/fm-supervise-daemon.sh`) buffers escalations and injects them into firstmate's own pane.
-When injection cannot confirm a submit past `FM_MAX_DEFER_SECS` (the pane is genuinely busy or wedged, or its Enter is swallowed), `inject_wedge_alarm` raises a loud, rate-limited alarm so the stall never stays invisible.
+The sub-supervisor (`bin/fm-supervise-daemon.sh`) buffers escalations for the configured [supervisor transport](configuration.md#supervisor-transport-fm_supervisor_backend--fm_supervisor_target).
+When delivery remains unconfirmed past `FM_MAX_DEFER_SECS`, `inject_wedge_alarm` raises a loud, rate-limited alarm so the stall never stays invisible.
 
 ## Why an active channel beyond the status-line flash
 

@@ -47,8 +47,8 @@ fm_afk_start_usage() {
   sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
-# fm_afk_clear_stale_artifacts: on a FRESH away-session entry (the daemon is not
-# already running), drop the previous away session's leftover escalation-delivery
+# fm_afk_clear_stale_artifacts: on a FRESH pane away-session entry (the daemon is
+# not already running), drop the previous session's leftover escalation-delivery
 # artifacts so they cannot surface as stale escalations under the new session.
 # These are session-scoped by timing: a fresh entry owns a new supervision
 # session and the new daemon has not produced anything yet, so anything present
@@ -60,6 +60,8 @@ fm_afk_start_usage() {
 # lifecycle" and bin/fm-supervise-daemon.sh's escalate_add/inject_wedge_alarm).
 # NOT called on a refresh (daemon already alive), so the current session's own
 # buffered escalations are preserved.
+# Native binding or pending evidence forbids clearing: reconciliation depends on
+# the retained buffer's inode identity (fm-codex-queue.py reconcile).
 fm_afk_has_native_delivery() {
   [ -e "$1/.codex-queue-pending.json" ] || [ -e "$1/.codex-queue-target.json" ]
 }

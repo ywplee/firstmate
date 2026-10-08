@@ -18,14 +18,16 @@ After binding, the existing AFK launcher can select `codex-queue` from an explic
 It hosts the existing supervisor in a detached tmux session, leaving the CLI, its daemon and home ownership unchanged.
 Only the recorded supervisor singleton submits escalations; ordinary worker-spawn backends and pane transports retain their existing contracts.
 The helper records a pending snapshot before one `codex queue --remote unix://PATH --thread UUID --message TEXT` invocation.
+Native Unix-remote commands omit `--no-daemon` because CLI `0.160.1` rejects that combination; ordinary workers, capability probes, scratch daemon launches/probes and the terminal alternative retain it.
 It requires a matching native user-input record, its turn start and the same turn's completion before consuming that snapshot's buffer prefix and recording a receipt.
 Later buffered events survive that reconciliation.
 Queue exit zero means acceptance, never handling.
 An ambiguous timeout or failure remains pending and is not blindly resent after restart; existing bounded wedge alarms surface absent handling.
+Fresh AFK entry preserves delivery artifacts whenever native binding or pending evidence exists, because reconciliation depends on the retained buffer identity.
 This provides at-most-once submission attempts with durable ambiguous outcomes, rather than claiming server-side exactly-once execution.
 
 The native queue bypasses terminal keystrokes and the pane composer guard; its busy ordering and draft preservation require native fixture evidence for the supported version pair.
-Normal return stops supervision first, forbids new native submissions once catch-up starts, and reconciles any outstanding handling receipt before closing the return gate.
+AFK return stops supervision first, forbids new native submissions once catch-up starts, and reconciles any outstanding handling receipt before closing the return gate.
 A replaced daemon/CLI or unresolved pending submission requires explicit owner reconciliation, not automatic rebinding or lock deletion.
 Archive a stale binding and pending evidence only after the owning Firstmate has classified the original event, retained its durable wake and confirmed that replay cannot duplicate already handled work.
 The helper does not repair that ambiguity automatically.
@@ -39,12 +41,16 @@ Do not arm a foreground watcher concurrently.
 Owner-only `bin/fm-afk-launch.sh stop-normal` disables submission before orderly shutdown and preserves buffered events; it refuses while away mode or return catch-up is active.
 Entering AFK reuses the singleton, and genuine return stops it and disarms normal ownership before completing catch-up.
 Only the owning coordinator may rearm normal supervision after catch-up resolves.
+A marked escalation while `state/.afk` is absent is normal supervision input, not an instruction to enter away mode.
+Ordinary unmarked input in that state does not invoke AFK return or disable normal ownership.
 A departed or replaced CLI owner stops normal delivery without rebinding, deleting the ownership record or replaying pending submissions.
 
 The first combined normal-mode fixture handled a real worker's blocked event through the watcher after the coordinator's final response with AFK absent, then handled idle, draft, busy and restart events.
 It failed explicit normal shutdown because the watcher's foreground 30-second signal grace delayed SIGTERM handling beyond the launcher's unchanged 10-second deadline.
 The watcher now waits for an owned background grace process and reaps it during cleanup; deterministic regression verifies prompt shutdown and later recovery of the unsurfaced status.
-The live attempt remains failed, and current-source full lifecycle proof, review and CI remain required before readiness.
+The live attempt remains failed, and its partial handling observations do not establish the corrected source's full lifecycle.
+Current-source proof must cover normal disable during default grace and owner rearm, AFK singleton reuse and pending return/catch-up, owner exit, and affected native and terminal safety/recovery cases before readiness.
+Historical AFK native and terminal passes remain separate evidence; changes to shared lifecycle code prevent treating them as current-source passes.
 
 ### Native evidence and current limits
 
@@ -57,7 +63,7 @@ The integration's first bounded live fixture failed before binding because its s
 A single command correction was accepted after the fixture's readiness deadline had already begun CLI cleanup; its binding correctly refused the departed CLI PID.
 No current-helper post-final, busy, draft or restart handling result is claimed from that initial fixture.
 A corrected fixture bound its native target and started the supervisor, but the normal90-second batching interval exceeded its idle handling deadline.
-The exact current helper queued a real post-final event at14:19:59.033Z, with native completion at14:20:06.237Z and marker `HANDLED_idle` during cleanup.
+The helper at that recorded revision queued a real post-final event at14:19:59.033Z, with native completion at14:20:06.237Z and marker `HANDLED_idle` during cleanup.
 The supervisor had stopped before completion, leaving its pending journal unreconciled; CLI and daemon exited0.
 That partial handling observation does not convert the failed fixture to a pass or establish busy, draft, duplicate or restart handling.
 The preserved source hashes, native rollout, true command results and cleanup evidence distinguish this failure from the earlier transport probes.
@@ -157,7 +163,8 @@ Review corrections changed the helper's launch arguments, preflight and ownershi
 Fresh live proof using the corrected helper and the authorized personal `gpt-6.1-sol`/`high` launch is required before readiness claims; the original-helper observations do not establish corrected-source delivery.
 
 Run the deterministic helper test with `bin/fm-test-run.sh tests/fm-codex-supervisor.test.sh`.
-The credentialed opt-in fixture is `FM_CODEX_SUPERVISOR_LIVE_E2E=1 CODEX_HOME=/Users/yewonlee/.codex-personal bin/fm-test-run.sh tests/fm-codex-supervisor-live-e2e.test.sh`; it launches `gpt-6.1-sol` with `high` effort, creates disposable homes and a private tmux socket, retains evidence, and must fail when startup or handling is not proven.
+The credentialed opt-in fixture is `tests/fm-codex-supervisor-live-e2e.test.sh`; its header and prerequisite checks own the required environment, including an outer deadline that reserves cleanup time.
+It launches `gpt-6.1-sol` with `high` effort, uses a disposable or explicitly supplied scratch home and a private tmux socket, retains evidence, and must fail when startup or handling is not proven.
 The existing checkpoint, wake lifecycle, daemon and composer suites provide additional isolated coverage; simulated composers are not current Codex delivery proof.
 
 The new helper supports tmux primary hosting only.
@@ -165,3 +172,4 @@ Existing tmux and Herdr AFK launch paths and the Claude, Codex, OpenCode, Pi and
 Zellij, Orca and cmux remain outside the existing daemon's supported supervisor backends, regardless of their worker-spawn support.
 Desktop remains without a verified same-coordinator post-final wake route in this environment.
 No Desktop unattended claim, overnight-duration proof, operating-system sleep/wake guarantee or live-home rollout follows from these scratch results.
+Actual Warp binding/activation and a two-hour blocked-event handling-latency soak remain owner-controlled rollout work after full final-code review, final-source testing, green CI and authorized merge.
