@@ -447,6 +447,22 @@ class RemoteBindingTests(unittest.TestCase):
             self.bind(arguments)
         self.assertFalse((self.state / '.codex-queue-target.json').exists())
 
+class LiveDeadlineTests(unittest.TestCase):
+    def test_expired_outer_deadline_refuses_before_credentials_or_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory)
+            account = scratch / 'account'
+            account.mkdir()
+            auth = account / 'auth.json'
+            auth.write_text('credential must remain here')
+            evidence = scratch / 'evidence'
+            env = dict(os.environ, FM_CODEX_QUEUE_LIVE_E2E='1', FM_CODEX_QUEUE_LIVE_CLI='/missing-cli', FM_CODEX_QUEUE_LIVE_DAEMON='/missing-daemon', CODEX_HOME=str(account), FM_CODEX_QUEUE_LIVE_EVIDENCE=str(evidence), FM_CODEX_LIVE_DEADLINE='0')
+            result = subprocess.run(['bash', str(root / 'tests/fm-codex-queue-live-e2e.test.sh')], env=env, text=True, capture_output=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('outer deadline leaves no execution time', result.stderr)
+            self.assertEqual(auth.read_text(), 'credential must remain here')
+            self.assertEqual(list(evidence.iterdir()), [])
+
 class RestartRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.pending = {'id': 'original', 'message': 'exact original input', 'buffer': 'original event\n', 'acceptance': 'accepted'}

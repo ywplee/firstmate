@@ -7,13 +7,14 @@ if [ "${FM_CODEX_SUPERVISOR_LIVE_E2E:-0}" != 1 ]; then
 fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/tests/lib.sh"
+: "${FM_CODEX_LIVE_DEADLINE:?set the shared outer execution deadline}"
 [ -n "${CODEX_HOME:-}" ] && [ -d "$CODEX_HOME" ] || fail 'explicit account home required'
 REAL_TMUX=$(command -v tmux) || fail 'tmux required'
 command -v codex >/dev/null 2>&1 || fail 'Codex required'
 LAB=$(mktemp -d "${FM_CODEX_SUPERVISOR_EVIDENCE:-${TMPDIR:-/tmp}}/fm-codex-supervisor-live.XXXXXX")
 SOCKET="fm-codex-supervisor-live-$$"
 export FM_HOME
-FM_HOME=$(mktemp -d "${TMPDIR:-/tmp}/fm-codex-supervisor-home.XXXXXX")
+FM_HOME=${FM_CODEX_SUPERVISOR_SCRATCH:-$(mktemp -d "$ROOT/.fm-codex-supervisor-home.XXXXXX")}
 printf '%s\n' "$FM_HOME" > "$LAB/scratch-home.txt"
 mkdir -p "$FM_HOME/state" "$LAB/fakebin"
 git init -q "$FM_HOME"
@@ -43,18 +44,36 @@ printf '#!/usr/bin/env bash\nexec env PATH=%q FM_POLL=1 FM_SIGNAL_GRACE=1 FM_HEA
 chmod +x "$LAB/launch.sh" "$LAB/daemon-entry.sh"
 
 cleanup() {
-  local pid
+  local current
   date -u +%Y-%m-%dT%H:%M:%SZ > "$LAB/cleanup-started.txt"
-  pid=$(cat "$FM_HOME/state/.supervise-daemon.pid" 2>/dev/null || true)
-  case "$pid" in ''|*[!0-9]*) ;; *) kill "$pid" 2>/dev/null || true ;; esac
-  "$REAL_TMUX" -L "$SOCKET" kill-server 2>/dev/null || true
+  "$ROOT/bin/fm-afk-launch.sh" stop >> "$LAB/cleanup-lifecycle.txt" 2>&1 || true
+  if [ -n "${server_pid:-}" ]; then
+    current=$(fm_pid_identity "$server_pid" 2>/dev/null || true)
+    if [ -n "$current" ] && [ "$current" = "$server_identity" ]; then
+      "$REAL_TMUX" -L "$SOCKET" kill-server 2>/dev/null || true
+    fi
+  fi
 }
 trap cleanup EXIT
+trap 'exit 143' TERM INT
+
+check_deadline() {
+  [ "$(date +%s)" -lt "$((FM_CODEX_LIVE_DEADLINE - 120))" ] || fail 'shared outer execution deadline reached; cleanup reserved'
+}
+
+check_prompt() {
+  if grep -Ei 'trust this (folder|directory)|sign in|log in|trust.*(hook|configuration)' "$LAB/transcript.txt" >/dev/null; then
+    fail "new trust/login prompt requires stopping verification (evidence $LAB)"
+  fi
+}
 
 capture() { "$REAL_TMUX" -L "$SOCKET" capture-pane -p -t '%0' -S -1000; }
 wait_for_text() {
   local path=$1 needle=$2
   for _ in $(seq 1 120); do
+    check_deadline
+    capture > "$LAB/transcript.txt" || true
+    check_prompt
     if [ -f "$path" ] && grep -F -- "$needle" "$path" >/dev/null; then return 0; fi
     sleep 1
   done
@@ -63,7 +82,9 @@ wait_for_text() {
 }
 wait_idle() {
   for _ in $(seq 1 120); do
+    check_deadline
     capture > "$LAB/transcript.txt"
+    check_prompt
     if grep -F 'Killed: 9' "$LAB/transcript.txt" >/dev/null; then
       fail "Codex launch was killed before readiness (evidence $LAB)"
     fi
@@ -86,9 +107,14 @@ stop_daemon() {
   fail 'scratch daemon did not stop through its owner'
 }
 
+check_deadline
 codex --no-daemon --version > "$LAB/version.txt"
 shasum -a 256 "$ROOT/bin/fm-codex-supervisor.sh" "$ROOT/bin/fm-afk-launch.sh" "$ROOT/bin/fm-supervise-daemon.sh" "$ROOT/bin/fm-tmux-lib.sh" > "$LAB/code-sha256.txt"
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s coordinator -x 180 -y 48 '/bin/bash --noprofile --norc -i'
+. "$ROOT/bin/fm-wake-lib.sh"
+server_pid=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t '%0' '#{pid}')
+server_identity=$(fm_pid_identity "$server_pid")
+printf '%s\n%s\n' "$server_pid" "$server_identity" > "$LAB/tmux-owner.txt"
 sleep 1
 "$REAL_TMUX" -L "$SOCKET" send-keys -t '%0' -l "$(printf '%q' "$LAB/launch.sh")"
 "$REAL_TMUX" -L "$SOCKET" send-keys -t '%0' Enter

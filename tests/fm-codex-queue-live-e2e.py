@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -17,7 +18,11 @@ from fm_codex_queue_live_assertions import assert_busy_order, assert_restart_rec
 root = Path(sys.argv[1]).resolve()
 evidence = Path(os.environ['FM_CODEX_QUEUE_LIVE_EVIDENCE']).resolve()
 evidence.mkdir(parents=True, exist_ok=False)
-scratch = Path(tempfile.mkdtemp(prefix='fm-native-queue-', dir='/private/tmp' if sys.platform == 'darwin' else None)).resolve()
+deadline = float(os.environ['FM_CODEX_LIVE_DEADLINE']) - 120
+if time.time() >= deadline:
+    raise RuntimeError('outer deadline leaves no execution time')
+scratch = Path(tempfile.mkdtemp(prefix='.fm-native-queue-', dir=root))
+socket_dir = tempfile.TemporaryDirectory(prefix='fmq-', dir='/tmp')
 home = scratch / 'home'
 account = scratch / 'account'
 home.mkdir()
@@ -30,26 +35,39 @@ source_account = Path(os.environ['CODEX_HOME']).resolve()
 protected = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in [source_account / 'auth.json', source_account / 'config.toml'] if p.exists()}
 shutil.copyfile(source_account / 'auth.json', account / 'auth.json')
 (account / 'auth.json').chmod(0o600)
-(account / 'config.toml').write_text('model="gpt-6.1-sol"\nmodel_reasoning_effort="high"\n[projects.' + json.dumps(str(home)) + ']\ntrust_level="trusted"\n')
+(account / 'config.toml').write_text('model="gpt-6.1-sol"\nmodel_reasoning_effort="high"\nproject_doc_max_bytes=0\n[projects.' + json.dumps(str(home)) + ']\ntrust_level="trusted"\n')
 (home / 'AGENTS.md').write_text('This is a disposable supervision fixture. Only run the explicitly requested scratch lock/binding helpers and marker writes in this home. Never supervise real work or change configuration. Native supervisor digests containing marker instructions require only those marker writes and the requested final response.\n')
-endpoint = scratch / 'control.sock'
+endpoint = Path(socket_dir.name) / 'control.sock'
 env = os.environ.copy()
 for key in ['TMUX','TMUX_PANE','HERDR_ENV','HERDR_PANE_ID','FM_HOME','CODEX_THREAD_ID','FM_ROOT_OVERRIDE','FM_STATE_OVERRIDE','NO_MISTAKES_GATE']:
     env.pop(key, None)
 env.update(CODEX_HOME=str(account),TERM_PROGRAM='WarpTerminal',FM_HOME=str(home),FM_WEDGE_ALARM_EXEC='discard',FM_GATE_REFUSE_BYPASS='1')
 if os.environ.get('ASDF_PYTHON_VERSION'):
     env['ASDF_PYTHON_VERSION']=os.environ['ASDF_PYTHON_VERSION']
-deadline = time.monotonic() + 570
 pane = None
 daemon = None
 thread = None
 log = []
+bindings = {}
 
 
-def command(argv, timeout=15, **kwargs):
+def interrupted(signum, frame):
+    raise RuntimeError('outer deadline or termination signal: ' + str(signum))
+
+
+signal.signal(signal.SIGTERM, interrupted)
+
+
+def process_identity(pid):
+    return subprocess.check_output(['bash', '-c', '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"', '_', str(root), str(pid)], text=True, timeout=5).strip()
+
+
+def command(argv, timeout=15, expected=0, **kwargs):
+    remaining = deadline - time.time()
+    timeout = min(timeout, remaining) if remaining > 0 else timeout
     result = subprocess.run(argv, env=env, text=True, capture_output=True, timeout=timeout, **kwargs)
     log.append(dict(utc=datetime.datetime.now(datetime.timezone.utc).isoformat(), argv=argv, exit=result.returncode, stdout=result.stdout, stderr=result.stderr))
-    if result.returncode:
+    if result.returncode != expected:
         raise RuntimeError('command failed: ' + result.stderr[:400])
     return result.stdout.strip()
 
@@ -57,18 +75,20 @@ def command(argv, timeout=15, **kwargs):
 def snapshot():
     if pane:
         value = command(['tmux','capture-pane','-p','-t',pane,'-S','-100'])
-        if re.search(r'trust this (directory|folder)|sign in|log in', value, re.I):
+        if re.search(r'trust this (directory|folder|workspace|project)|trust.*(hook|configuration)|sign in|log in', value, re.I):
             raise RuntimeError('new trust/login prompt; fixture stops')
         return value
     return ''
 
 
 def wait(predicate, label, seconds=90):
-    stop = min(deadline, time.monotonic() + seconds)
-    while time.monotonic() < stop:
+    stop = min(deadline, time.time() + seconds)
+    while time.time() < stop:
         if daemon and daemon.poll() is not None:
             raise RuntimeError('daemon exited before ' + label)
         snapshot()
+        if (scratch/'cli.exit').exists():
+            raise RuntimeError('native CLI exited before ' + label + ': ' + (scratch/'cli.exit').read_text())
         result = predicate()
         if result:
             return result
@@ -106,6 +126,20 @@ def handled(kind):
     lines = (home / ('handled-' + kind)).read_text().splitlines()
     if lines != ['HANDLED_' + kind]:
         raise RuntimeError('non-exact/duplicate handling: ' + kind)
+    receipts = [json.loads(path.read_text()) for path in (home / 'state/.codex-queue-receipts').glob('*.json')]
+    matches = [receipt for receipt in receipts if 'Harmless fixture event ' + kind + ':' in receipt['buffer']]
+    if len(matches) != 1:
+        raise RuntimeError('handling lacks one durable receipt: ' + kind)
+    turn = matches[0]['handled']['turn']
+    items = native_events()
+    inputs = [item for item in items if item.get('type') == 'response_item' and item.get('payload', {}).get('role') == 'user' and any(part.get('text') == matches[0]['message'] for part in item['payload'].get('content', []))]
+    if len(inputs) != 1 or inputs[0]['payload'].get('internal_chat_message_metadata_passthrough', {}).get('turn_id') != turn:
+        raise RuntimeError('handling lacks one exact same-thread input: ' + kind)
+    starts = [index for index, item in enumerate(items) if item.get('type') == 'event_msg' and item.get('payload', {}).get('type') == 'task_started' and item['payload'].get('turn_id') == turn]
+    completes = [index for index, item in enumerate(items) if item.get('type') == 'event_msg' and item.get('payload', {}).get('type') == 'task_complete' and item['payload'].get('turn_id') == turn]
+    if len(starts) != 1 or len(completes) != 1 or starts[0] >= completes[0]:
+        raise RuntimeError('handling lacks ordered native turn completion: ' + kind)
+    bindings.setdefault('handling', {})[kind] = dict(id=matches[0]['id'], turn=turn, start=starts[0], complete=completes[0])
 
 
 try:
@@ -117,24 +151,60 @@ try:
     command([str(python_bin),'-c','import json, pathlib, subprocess, socket, sys; assert sys.version_info >= (3,8); print(sys.executable)'])
     command(['tmux','-V'])
     command(['lsof','-v'])
+    command(['git','init','-q',str(home)])
     bindings['python']=str(python_bin)
     bindings['python_version']=command([str(python_bin),'--version'])
-    daemon = subprocess.Popen([str(daemon_bin),'app-server','--listen','unix://' + str(endpoint),'--managed-daemon','-c','features.api_key_model_discovery=false','-c','features.auth_elicitation=true','-c','features.code_mode_host=true','-c','features.mcp_oauth_refresh_coordination=false'],env=env,cwd=home,stdout=(evidence/'daemon.stdout').open('w'),stderr=(evidence/'daemon.stderr').open('w'))
+    daemon = subprocess.Popen([str(daemon_bin),'--no-daemon','app-server','--listen','unix://' + str(endpoint),'--managed-daemon','-c','features.api_key_model_discovery=false','-c','features.auth_elicitation=true','-c','features.code_mode_host=true','-c','features.mcp_oauth_refresh_coordination=false'],env=env,cwd=home,stdout=(evidence/'daemon.stdout').open('w'),stderr=(evidence/'daemon.stderr').open('w'))
+    bindings['daemon_identity'] = process_identity(daemon.pid)
+    bindings['daemon_pid'] = daemon.pid
+    (evidence/'bindings.json').write_text(json.dumps(bindings, indent=2))
     wait(lambda:endpoint.exists(),'owned socket',30)
-    prompt = 'Run exactly one shell command: export ' + ('ASDF_PYTHON_VERSION=' + shlex.quote(env['ASDF_PYTHON_VERSION']) + ' ' if env.get('ASDF_PYTHON_VERSION') else '') + 'FM_HOME=' + shlex.quote(str(home)) + ' FM_CODEX_QUEUE_CLI_PID=$(cat ' + shlex.quote(str(scratch/'cli.pid')) + ') FM_CODEX_QUEUE_SOCKET=' + shlex.quote(str(endpoint)) + '; ' + shlex.quote(str(root/'bin/fm-lock.sh')) + ' && ' + shlex.quote(str(python_bin)) + ' ' + shlex.quote(str(root/'bin/fm-codex-queue.py')) + ' bind && printf BASELINE > baseline. Do no other work. Finish with exactly BASELINE_FINAL.'
-    argv=[str(cli),'--remote','unix://' + str(endpoint),'--no-alt-screen','--model','gpt-6.1-sol','-c','model_reasoning_effort="high"','--sandbox','danger-full-access','--ask-for-approval','never','-C',str(home),prompt]
+    binder = shlex.join([str(python_bin), str(root/'bin/fm-codex-queue.py'), 'bind'])
+    prompt = "Bind this home's native queue. Run exactly one shell command: export " + ('ASDF_PYTHON_VERSION=' + shlex.quote(env['ASDF_PYTHON_VERSION']) + ' ' if env.get('ASDF_PYTHON_VERSION') else '') + 'FM_HOME=' + shlex.quote(str(home)) + ' FM_CODEX_QUEUE_CLI_PID=$(cat ' + shlex.quote(str(scratch/'cli.pid')) + ') FM_CODEX_QUEUE_SOCKET=' + shlex.quote(str(endpoint)) + '; ' + shlex.quote(str(root/'bin/fm-lock.sh')) + ' && cp state/.lock lock-before && if FM_CODEX_QUEUE_SOCKET=' + shlex.quote(str(endpoint) + '.other') + ' ' + binder + ' > wrong-socket.txt 2>&1; then exit 1; fi; cmp state/.lock lock-before && ' + binder + ' && printf BASELINE > baseline. Do no other work. Finish with exactly BASELINE_FINAL.'
+    argv=[str(cli),'--no-daemon','--remote','unix://' + str(endpoint),'--no-alt-screen','--model','gpt-6.1-sol','-c','model_reasoning_effort="high"','--sandbox','danger-full-access','--ask-for-approval','never','-C',str(home),prompt]
     launch_file = scratch / 'launch.sh'
     inner='printf "%s" "$$" > ' + shlex.quote(str(scratch/'cli.pid')) + '; exec env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u CODEX_THREAD_ID ' + ' '.join(shlex.quote(k+'='+v) for k,v in env.items() if k in ['CODEX_HOME','FM_HOME','TERM_PROGRAM','FM_GATE_REFUSE_BYPASS','FM_WEDGE_ALARM_EXEC','ASDF_PYTHON_VERSION']) + ' ' + shlex.join(argv)
     launch_file.write_text('#!/bin/sh\nsh -c ' + shlex.quote(inner) + '\nresult=$?\nprintf "%s" "$result" > ' + shlex.quote(str(scratch/'cli.exit')) + '\nexit "$result"\n')
     launch_file.chmod(0o700)
-    pane=command(['tmux','new-window','-d','-P','-F','#{pane_id}','-n','fm-native-fixture',str(launch_file)])
+    tmux_socket = 'fm-native-proof-' + str(os.getpid())
+    fakebin = scratch / 'fakebin'
+    fakebin.mkdir()
+    tmux_bin = shutil.which('tmux')
+    (fakebin / 'tmux').write_text('#!/bin/sh\nexec ' + shlex.join([tmux_bin, '-L', tmux_socket]) + ' "$@"\n')
+    (fakebin / 'tmux').chmod(0o700)
+    env['PATH'] = str(fakebin) + ':' + env['PATH']
+    pane=command(['tmux','new-session','-d','-P','-F','#{pane_id}','-s','fm-native-fixture','-x','180','-y','48','/bin/bash --noprofile --norc -i'])
+    command(['tmux','set-option','-w','-t',pane,'remain-on-exit','on'])
+    bindings['tmux_pid'] = int(command(['tmux', 'display-message', '-p', '-t', pane, '#{pid}']))
+    bindings['tmux_identity'] = process_identity(bindings['tmux_pid'])
     bindings.update(daemon_pid=daemon.pid,pane=pane)
     (evidence/'bindings.json').write_text(json.dumps(bindings,indent=2))
+    command(['tmux','send-keys','-t',pane,'-l','exec ' + shlex.quote(str(launch_file))])
+    command(['tmux','send-keys','-t',pane,'Enter'])
     wait(lambda:(home/'state/.codex-queue-target.json').exists(),'native binding')
     wait(lambda:final('BASELINE_FINAL') and (home/'baseline').exists(),'baseline final')
     target=json.loads((home/'state/.codex-queue-target.json').read_text())
+    bindings['cli_identity'] = process_identity(target['cli_pid'])
+    bindings['cli_pid'] = target['cli_pid']
+    if 'owner socket is absent' not in (home / 'wrong-socket.txt').read_text():
+        raise RuntimeError('wrong socket binding was not refused')
     thread=target['thread']
     env.update(FM_SUPERVISOR_BACKEND='codex-queue',FM_SUPERVISOR_TARGET=thread,FM_ESCALATE_BATCH_SECS='0',FM_HOUSEKEEPING_TICK='1',FM_POLL='1',FM_HEARTBEAT='999999',FM_MAX_DEFER_SECS='5')
+    original_target = (home / 'state/.codex-queue-target.json').read_bytes()
+    original_lock = (home / 'state/.lock').read_bytes()
+    for field, value in [('cli_identity', target['cli_identity'] + ' replaced'), ('socket_identity', [target['socket_identity'][0], target['socket_identity'][1] + 1, target['socket_identity'][2]])]:
+        changed = dict(target, **{field: value})
+        (home / 'state/.codex-queue-target.json').write_text(json.dumps(changed))
+        before = (home / 'state/.codex-queue-target.json').read_bytes()
+        command([str(python_bin), str(root/'bin/fm-codex-queue.py'), 'check'], expected=1)
+        if (home / 'state/.codex-queue-target.json').read_bytes() != before or (home / 'state/.lock').read_bytes() != original_lock:
+            raise RuntimeError('refusal changed ownership records')
+        (home / 'state/.codex-queue-target.json').write_bytes(original_target)
+    bindings['wrong_target_refusals'] = ['socket prefix', 'replaced CLI identity', 'replaced socket identity']
+    fault = scratch / 'queue-crash.py'
+    fault.write_text('import json, os, pathlib, runpy, signal, subprocess, sys\noriginal = subprocess.run\ndef run(argv, *args, **kwargs):\n    result = original(argv, *args, **kwargs)\n    if len(argv) > 1 and argv[1] == "queue":\n        with open(' + repr(str(evidence / 'queue-attempts.jsonl')) + ', "a") as stream:\n            stream.write(json.dumps(dict(argv=argv, exit=result.returncode, stdout=result.stdout, stderr=result.stderr)) + "\\n")\n            stream.flush()\n            os.fsync(stream.fileno())\n        armed = pathlib.Path(' + repr(str(home / 'crash-after-acceptance')) + ')\n        if armed.exists() and result.returncode == 0:\n            armed.unlink()\n            os.kill(os.getpid(), signal.SIGKILL)\n    return result\nsubprocess.run = run\nsys.argv = sys.argv[1:]\nrunpy.run_path(sys.argv[0], run_name="__main__")\n')
+    (fakebin / 'python3').write_text('#!/bin/sh\nif [ "$1" = ' + shlex.quote(str(root / 'bin/fm-codex-queue.py')) + ' ]; then exec ' + shlex.join([str(python_bin), str(fault)]) + ' "$@"; fi\nexec ' + shlex.quote(str(python_bin)) + ' "$@"\n')
+    (fakebin / 'python3').chmod(0o700)
     daemon_entry = scratch / 'daemon-entry.sh'
     daemon_entry.write_text('#!/bin/sh\nexec env ' + shlex.join([key + '=' + env[key] for key in ['PATH','FM_ESCALATE_BATCH_SECS','FM_HOUSEKEEPING_TICK','FM_POLL','FM_HEARTBEAT','FM_MAX_DEFER_SECS','FM_WEDGE_ALARM_EXEC','FM_GATE_REFUSE_BYPASS','ASDF_PYTHON_VERSION'] if key in env]) + ' ' + shlex.quote(str(root / 'bin/fm-afk-start.sh')) + '\n')
     daemon_entry.chmod(0o700)
@@ -194,10 +264,55 @@ try:
     if len(busy_receipts) != 1:
         raise RuntimeError('busy event lacks one exact handling receipt')
     bindings['busy_order'] = assert_busy_order(native_events(), busy, busy_receipts[0])
-    command([str(root/'bin/fm-afk-return.sh')])
+    return_script = home / 'pending-return.sh'
+    return_script.write_text('export FM_HOME=' + shlex.quote(str(home)) + ' FM_SUPERVISOR_TARGET=' + shlex.quote(thread) + '\nprintf started > return-start\nwhile [ ! -f return-request ]; do sleep 0.2; done\n' + shlex.quote(str(root/'bin/fm-afk-return.sh')) + ' > return-begin.txt 2>&1\nprintf "%s" "$?" > return-begin.exit\nwhile [ ! -f return-release ]; do sleep 0.2; done\nprintf ended > return-end\n')
+    busy_return = 'Run exactly bash pending-return.sh in this scratch directory; do no other work; finish with exactly RETURN_BUSY_FINAL.'
+    command(['tmux','send-keys','-t',pane,'-l',busy_return])
+    time.sleep(0.3)
+    command(['tmux','send-keys','-t',pane,'Enter'])
+    wait(lambda:(home/'return-start').exists(),'pending-return foreground tool')
+    (home/'crash-after-acceptance').touch()
+    ambiguous_event = marker('ambiguous')
+    def ambiguous_pending():
+        if pending_path.exists() and not (home/'crash-after-acceptance').exists():
+            value = json.loads(pending_path.read_text())
+            return value if value['acceptance'] == 'unknown' and ambiguous_event in value['buffer'].splitlines() else None
+    ambiguous = wait(ambiguous_pending, 'real queue accepted before submitting helper crashed')
+    wait(lambda:(home/'state/.subsuper-inject-wedged').exists(),'ambiguous pending wedge')
+    attempts_path = evidence / 'queue-attempts.jsonl'
+    attempts = [json.loads(line) for line in attempts_path.read_text().splitlines()]
+    attempts_before = [attempt for attempt in attempts if ambiguous['message'] in attempt['argv']]
+    if len(attempts_before) != 1 or attempts_before[0]['exit'] != 0:
+        raise RuntimeError('ambiguous submission lacks one real accepted attempt')
+    time.sleep(6)
+    if json.loads(pending_path.read_text()) != ambiguous or len([line for line in attempts_path.read_text().splitlines() if ambiguous['message'] in json.loads(line)['argv']]) != 1:
+        raise RuntimeError('ambiguous submission was changed or retried')
+    (evidence/'ambiguous-pending.json').write_text(json.dumps(ambiguous, indent=2))
+    (evidence/'ambiguous-wedge.txt').write_text((home/'state/.subsuper-inject-wedged').read_text())
+    (home/'return-request').touch()
+    wait(lambda:(home/'return-begin.exit').exists(),'pending return synchronous result')
+    if (home/'return-begin.exit').read_text() != '3' or not (home/'state/.afk-return-catchup').exists() or not pending_path.exists():
+        raise RuntimeError('pending return did not retain its catch-up gate and journal')
+    later_return = marker('return-later')
+    (evidence/'pending-return-gate.txt').write_text((home/'state/.afk-return-catchup').read_text())
+    (home/'return-release').touch()
+    wait(lambda:final('FINAL_ambiguous'),'ambiguous original input completed after return began')
+    check_return = 'Run exactly ' + shlex.quote(str(root/'bin/fm-afk-return.sh')) + ' check > return-check.txt 2>&1; save its exit status in return-check.exit. Do no other work; finish with exactly RETURN_CLEAR_FINAL.'
+    command(['tmux','send-keys','-t',pane,'-l',check_return])
+    time.sleep(0.3)
+    command(['tmux','send-keys','-t',pane,'Enter'])
+    wait(lambda:final('RETURN_CLEAR_FINAL') and (home/'return-check.exit').exists(),'coordinator return reconciliation')
+    if (home/'return-check.exit').read_text().strip() != '0' or (home/'state/.afk-return-catchup').exists() or later_return not in (home/'return-check.txt').read_text():
+        raise RuntimeError('return catch-up did not reconcile and preserve the later event')
+    handled('ambiguous')
+    attempts_after = [json.loads(line) for line in attempts_path.read_text().splitlines()]
+    if attempts_after != attempts:
+        raise RuntimeError('a new native submission occurred during return')
+    bindings['ambiguous_acceptance'] = dict(id=ambiguous['id'], acceptance=ambiguous['acceptance'], attempts=1, fault='submitting helper SIGKILL after real native queue exit zero')
+    bindings['pending_return'] = dict(begin_exit=3, check_exit=0, later_event_caught_up=True, new_submissions=0)
     if (home/'state/.afk').exists() or (home/'state/.supervise-daemon.lock').exists():
         raise RuntimeError('orderly return left supervision active')
-    bindings['verdict']='PASS: real post-final, pending draft, busy ordering, restart and orderly return'
+    bindings['verdict']='PASS: exact binding, refusals, post-final, draft, busy ordering, pending restart, ambiguous acceptance and pending return'
 except Exception as error:
     bindings['verdict']='FAIL: ' + str(error)
     print(bindings['verdict'],file=sys.stderr)
@@ -205,12 +320,17 @@ finally:
     errors=[]
     try:
         (evidence/'last-pane.txt').write_text(snapshot())
+    except Exception as error:
+        errors.append(str(error))
+    try:
         if (home/'state/.afk-daemon-terminal').exists():
             command([str(root/'bin/fm-afk-launch.sh'),'stop'])
     except Exception as error:
         errors.append(str(error))
     try:
-        if pane:
+        if (scratch/'cli.exit').exists():
+            bindings['cli_exit']=int((scratch/'cli.exit').read_text())
+        elif pane:
             command(['tmux','send-keys','-t',pane,'C-u'])
             command(['tmux','send-keys','-t',pane,'-l','/quit'])
             time.sleep(0.3)
@@ -226,9 +346,18 @@ finally:
     except Exception as error:
         errors.append(str(error))
     try:
-        if daemon:
+        if daemon and daemon.poll() is None:
+            if process_identity(daemon.pid) != bindings['daemon_identity']:
+                raise RuntimeError('scratch daemon identity changed; refusing signal')
             daemon.terminate()
-            bindings['daemon_exit']=daemon.wait(timeout=10)
+            try:
+                bindings['daemon_exit']=daemon.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                if process_identity(daemon.pid) == bindings['daemon_identity']:
+                    daemon.kill()
+                    bindings['daemon_exit']=daemon.wait(timeout=5)
+        elif daemon:
+            bindings['daemon_exit']=daemon.returncode
         if (home/'state/.codex-queue-target.json').exists():
             target=json.loads((home/'state/.codex-queue-target.json').read_text())
             shutil.copyfile(target['rollout'], evidence/'native-rollout.jsonl')
@@ -241,6 +370,15 @@ finally:
     if errors:
         bindings['cleanup_errors']=errors
     (account/'auth.json').unlink(missing_ok=True)
+    bindings['scratch_credential_removed'] = not (account/'auth.json').exists()
+    try:
+        if bindings.get('tmux_pid') and process_identity(bindings['tmux_pid']) == bindings['tmux_identity']:
+            command(['tmux', 'kill-server'])
+    except subprocess.CalledProcessError:
+        pass
+    except Exception as error:
+        bindings.setdefault('cleanup_errors', []).append(str(error))
+    socket_dir.cleanup()
     (evidence/'commands.json').write_text(json.dumps(log,indent=2))
     (evidence/'receipt.json').write_text(json.dumps(bindings,indent=2))
     print(bindings.get('verdict','FAIL'))
