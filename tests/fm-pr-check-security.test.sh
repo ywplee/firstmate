@@ -2314,6 +2314,8 @@ test_bootstrap_isolates_incomplete_poll_migration() {
     'kind=secondmate' \
     'harness=codex' \
     'backend=tmux'
+  mkdir -p "$state/pending-replies"
+  printf 'task_id=secondmate-a\nphase=awaiting_report\n' > "$state/pending-replies/abcdef0123456789"
   printf 'FMX_PAIRING_TOKEN=test-token\n' > "$dir/home/.env"
   mkdir -p "$dir/home/projects"
   fm_fake_exit0 "$fakebin" curl jq
