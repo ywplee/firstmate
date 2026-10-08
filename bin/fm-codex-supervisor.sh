@@ -92,7 +92,7 @@ terminal_target() {
 }
 
 launch() {
-  local status pid help_text
+  local status pid watcher_path help_text
   status=$("$SCRIPT_DIR/fm-lock.sh" status) || fail 'cannot inspect coordinator ownership'
   case "$status" in
     'lock: free'|'lock: stale ('*) ;;
@@ -100,7 +100,8 @@ launch() {
   esac
   [ ! -e "$STATE/.afk" ] && [ ! -e "$STATE/.afk-return-catchup" ] || fail 'previous away-mode lifecycle is not closed; its owner must finish return/catch-up first'
   pid=$(cat "$STATE/.watch.lock/pid" 2>/dev/null || true)
-  if { fm_pid_alive "$pid" && fm_watcher_lock_matches_pid "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$pid" "$FM_HOME"; } || daemon_lock_held_by_live_daemon; then
+  watcher_path=$(cat "$STATE/.watch.lock/watcher-path" 2>/dev/null || true)
+  if { fm_pid_alive "$pid" && fm_watcher_lock_matches_pid "$STATE" "$watcher_path" "$pid" "$FM_HOME"; } || daemon_lock_held_by_live_daemon; then
     fail 'previous supervision process is still live; its owner must stop it before transfer'
   fi
   command -v codex >/dev/null 2>&1 || fail 'Codex CLI is unavailable'

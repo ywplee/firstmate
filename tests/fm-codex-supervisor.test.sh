@@ -112,6 +112,30 @@ FM_STATE_OVERRIDE="$FM_HOME/state" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pid_id
 expect_refusal 'previous supervision process is still live'
 cp -R "$FM_HOME/state/.watch.lock" "$TMP_ROOT/watcher-before"
 cmp "$TMP_ROOT/watcher-before/pid-identity" "$FM_HOME/state/.watch.lock/pid-identity" || fail 'refusal changed watcher identity'
+ln -s "$ROOT" "$TMP_ROOT/source-link"
+for watcher_path in "$TMP_ROOT/previous-checkout/bin/fm-watch.sh" "$TMP_ROOT/source-link/bin/fm-watch.sh"; do
+  printf '%s\n' "$watcher_path" > "$FM_HOME/state/.watch.lock/watcher-path"
+  snapshot=$(mktemp -d "$TMP_ROOT/watcher-records.XXXXXX")
+  cp -R "$FM_HOME/state/.watch.lock" "$snapshot/before"
+  expect_refusal 'previous supervision process is still live'
+  [ ! -e "$FM_TEST_PROBE_CALLS" ] || fail 'live watcher from another source path allowed a Codex probe'
+  diff -r "$snapshot/before" "$FM_HOME/state/.watch.lock" || fail 'refusal changed alternate-source watcher records'
+  cmp "$TMP_ROOT/lock-before" "$FM_HOME/state/.lock" || fail 'refusal changed old coordinator ownership'
+  cmp "$TMP_ROOT/queue-before" "$FM_HOME/state/.wake-queue" || fail 'refusal consumed pending wakes'
+done
+pass 'live same-home watcher from another checkout or symlink path refuses launch without changing records'
+
+printf '%s\n' "$TMP_ROOT/other-home" > "$FM_HOME/state/.watch.lock/fm-home"
+cp -R "$FM_HOME/state/.watch.lock" "$TMP_ROOT/other-home-watcher-before"
+"$SUPERVISOR" launch "${launch_args[@]}" > "$TMP_ROOT/other-home-launch.out"
+[ -s "$FM_TEST_CALLS" ] || fail 'watcher belonging to another home blocked launch'
+diff -r "$TMP_ROOT/other-home-watcher-before" "$FM_HOME/state/.watch.lock" || fail 'launch changed other-home watcher records'
+cmp "$TMP_ROOT/lock-before" "$FM_HOME/state/.lock" || fail 'launch changed old coordinator ownership'
+cmp "$TMP_ROOT/queue-before" "$FM_HOME/state/.wake-queue" || fail 'launch consumed pending wakes'
+rm "$FM_TEST_CALLS" "$FM_TEST_PROBE_CALLS"
+printf '%s\n' "$FM_HOME" > "$FM_HOME/state/.watch.lock/fm-home"
+pass 'other-home watcher identity remains isolated even when its source path differs'
+
 printf '%s\n' 'recycled-watcher-identity' > "$FM_HOME/state/.watch.lock/pid-identity"
 cp -R "$FM_HOME/state/.watch.lock" "$TMP_ROOT/stale-watcher-before"
 mkdir -p "$FM_HOME/state/.supervise-daemon.lock"
