@@ -152,6 +152,15 @@ return_reconcile() {
     fi
   fi
 
+  if [ -e "$STATE/.codex-queue-pending.json" ]; then
+    local native_target
+    native_target=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["thread"])' "$STATE/.codex-queue-target.json" 2>/dev/null) || native_target=
+    if ! FM_SUPERVISOR_TARGET="$native_target" python3 "$SCRIPT_DIR/fm-codex-queue.py" flush; then
+      append_evidence native-queue 'native queue submission lacks a matching completed handling turn; preserved pending receipt must be reconciled before return' "$evidence"
+      lifecycle_ok=0
+    fi
+  fi
+
   drained=$("$SCRIPT_DIR/fm-wake-drain.sh") || {
     append_evidence lifecycle 'durable wake drain failed; retry catch-up before ordinary work' "$evidence"
     lifecycle_ok=0

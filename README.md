@@ -72,7 +72,7 @@ All three have verified turn-end guard paths when launched with their documented
 Pick whichever one matches your subscription and workflow.
 
 Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
-For Codex terminal AFK supervision and orderly transfer from Desktop, see [Codex terminal supervision handoff](docs/codex-supervision-handoff.md).
+For Codex native queue AFK supervision and the alternative terminal handoff, see [Codex supervision support](docs/codex-supervision-handoff.md).
 
 ### Install and launch
 

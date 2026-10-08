@@ -18,8 +18,9 @@ batched digest rather than per-wake injections.
 
 ## What it does
 
-For a Codex primary using the new tmux handoff route, run `bin/fm-codex-supervisor.sh preflight` before entering this lifecycle; [`docs/codex-supervision-handoff.md`](../../../docs/codex-supervision-handoff.md) owns the terminal transfer and delivery-proof procedure, including Desktop's current wake limitation.
-Existing Herdr Codex primaries use the lifecycle below without this tmux-only preflight.
+For daemon-backed Codex CLI supervision, follow the native queue binding procedure in [`docs/codex-supervision-handoff.md`](../../../docs/codex-supervision-handoff.md).
+For the alternative tmux `--no-daemon` route, run `bin/fm-codex-supervisor.sh preflight` before entering this lifecycle.
+Existing Herdr Codex primaries use the pane lifecycle below without that tmux-only preflight.
 
 1. **Enter the lifecycle through `bin/fm-afk-launch.sh`.**
    This owns the durable state write, session-scoped stale-artifact clearing,
@@ -86,6 +87,14 @@ explicit word - the daemon just batches the notification.
 The daemon prefixes every injection with `FM_INJECT_MARK` (U+2063 INVISIBLE SEPARATOR), which has no normal keyboard keystroke and survives terminal transport as UTF-8 text.
 This is how firstmate tells a daemon escalation apart from a real message in the same pane.
 The marker travels with the message text; it does not rely on harness-level typed-vs-injected detection, which is not portable across claude, codex, opencode, pi, and grok.
+
+## Native queue transport
+
+A bound `codex-queue` supervisor uses the native thread queue and never types into the terminal composer.
+The existing launcher hosts its supervisor in detached tmux while leaving the coordinator in its current terminal.
+`bin/fm-codex-queue.py` owns exact target binding, acceptance versus handling, type-once pending submission recovery and return reconciliation.
+Pending submissions retain the escalation buffer and use the same bounded wedge alarm as pane delivery.
+See the owning [supervision guide](../../../docs/codex-supervision-handoff.md) for empirical versions and validation limits.
 
 ## Busy-guard and composer guard
 

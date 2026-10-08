@@ -69,7 +69,7 @@
 #                                   tmux target or a herdr "<session>:<pane-id>"
 #                                   target; which one it's read as is decided by
 #                                   FM_SUPERVISOR_BACKEND (below), independently.
-#          FM_SUPERVISOR_BACKEND    supervisor pane BACKEND (tmux|herdr;
+#          FM_SUPERVISOR_BACKEND    supervisor transport (tmux|herdr|codex-queue;
 #                                   override; otherwise auto-discovered the same
 #                                   way bin/fm-backend.sh's fm_backend_detect
 #                                   resolves the runtime firstmate itself is
@@ -79,6 +79,8 @@
 #                                   supported as supervisor backends; the daemon
 #                                   refuses loudly at startup rather than trying
 #                                   tmux primitives against a non-tmux pane.
+#                                   codex-queue uses the exact binding and durable
+#                                   handling receipts owned by fm-codex-queue.py.
 #          FM_INJECT_SKIP           |-prefixes force-self-handle bypassing
 #                                   classification (default "heartbeat"); empty
 #                                   disables. Use sparingly: it overrides the
@@ -176,7 +178,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # harness-verification discipline. Selecting one refuses loudly at startup
 # instead of silently running tmux primitives against a pane that is not a tmux
 # pane.
-FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr"
+FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr codex-queue"
 INJECT_SKIP_DEFAULT="heartbeat"
 STALE_ESCALATE_SECS_DEFAULT=240
 ESCALATE_BATCH_SECS_DEFAULT=90
@@ -622,6 +624,10 @@ escalate_add() {  # <state> <distilled-item>
 escalate_flush() {  # <state>
   local state=$1 buf item n msg
   buf="$state/.subsuper-escalations"
+  if [ "${FM_SUPERVISOR_BACKEND:-}" = codex-queue ]; then
+    python3 "$FM_DAEMON_DIR/fm-codex-queue.py" flush
+    return
+  fi
   [ -s "$buf" ] || return 0
   n=$(wc -l < "$buf" 2>/dev/null || echo 0)
   # Join buffered items with the literal " | " separator into one digest line.
@@ -1373,7 +1379,7 @@ fm_super_main() {
   # probe, so a herdr supervisor pane is checked via the herdr adapter; for
   # backend=tmux this runs the exact same `tmux display-message -p -t "$TARGET"
   # '#{pane_id}'` call as before.
-  if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
+  if ! fm_supervisor_target_exists "$BACKEND" "$TARGET"; then
     echo "error: supervisor target '$TARGET' does not resolve to a $BACKEND pane; set FM_SUPERVISOR_TARGET" >&2
     log "startup failed: target '$TARGET' not found (backend=$BACKEND)"
     fm_lock_release "$LOCK" 2>/dev/null || true
@@ -1441,9 +1447,10 @@ fm_super_main() {
     # has nowhere to go, and firstmate itself is the consumer of escalations.
     # Catch-up signals persist in state/*.status and flow on the next run, so
     # this delays rather than loses work.
-    if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
+    if ! fm_supervisor_target_exists "$BACKEND" "$TARGET"; then
       log "warn: supervisor target '$TARGET' gone; backing off ${INJECT_FAIL_SLEEP}s, will retry"
       # Flush is pointless with no pane; preserve any buffered escalations.
+      if [ "$BACKEND" = codex-queue ]; then housekeeping "$STATE"; fi
       sleep "$INJECT_FAIL_SLEEP"
       continue
     fi

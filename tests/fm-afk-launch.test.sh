@@ -243,13 +243,13 @@ unit_signal_exits_with_lock_cleanup() {
   marker="$st/resumed"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
-    fm_afk_launch_start() { sleep 30; }
+    fm_afk_launch_start() { : > "$FM_HOME/ready"; sleep 30; }
     fm_afk_launch_main start
     : > "$2"
   ' _ "$LAUNCH" "$marker" &
   child=$!
   for _ in $(seq 1 40); do
-    [ -d "$st/state/.afk-launch.lock" ] && break
+    [ -e "$st/ready" ] && break
     sleep 0.05
   done
   kill -TERM "$child" 2>/dev/null || true

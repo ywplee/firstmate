@@ -1,10 +1,57 @@
-# Codex terminal supervision handoff
+# Codex supervision support
 
-An addressable terminal Codex coordinator can use Firstmate's existing AFK daemon after its foreground turn ends.
-Codex Desktop foreground checkpoints alone cannot provide that delivery path.
-This procedure transfers a home only after its previous coordinator process exits; it does not add a Desktop bridge or another runtime backend.
+A daemon-backed Codex CLI coordinator can receive post-final input through its native queue while retaining its current terminal and home owner.
+The original environment was Warp Terminal with Codex CLI, not Codex Desktop; daemon ancestry alone does not identify the host.
+An addressable tmux coordinator remains an alternative using the existing pane transport.
+Neither route adds a worker-spawn runtime backend or a verified Desktop bridge.
 
-## Launch and preflight
+## Native daemon queue
+
+`bin/fm-codex-queue.py` owns binding, command syntax and private receipt fields.
+Run its `bind` action from the owning coordinator's tool context with explicit `FM_HOME`, `CODEX_HOME` and the inherited exact `CODEX_THREAD_ID`.
+The binding requires an identity-backed home lock, the same native thread's rollout working root and `danger-full-access/never` context, a live CLI and managed daemon, and a private Unix socket held by that daemon.
+It captures executable hashes and process/socket identities and refuses replacement, ambiguous sockets, a different home/thread, legacy PID-only locks or unverified versions without clearing any lock.
+An explicit-remote fixture must supply `FM_CODEX_QUEUE_CLI_PID` and `FM_CODEX_QUEUE_SOCKET`; the automatic CLI/daemon path uses the daemon's parent CLI and its unique owned socket.
+No login, package installation, default endpoint or daemon startup is part of this helper.
+
+After binding, the existing AFK launcher can select `codex-queue` from an explicit supervisor override or from the native thread/account environment when no supported pane marker takes precedence.
+It hosts the existing supervisor in a detached tmux session, leaving the CLI, its daemon and home ownership unchanged.
+Only the recorded supervisor singleton submits escalations; ordinary worker-spawn backends and pane transports retain their existing contracts.
+The helper records a pending snapshot before one `codex queue --remote unix://PATH --thread UUID --message TEXT` invocation.
+It requires a matching native user-input record, its turn start and the same turn's completion before consuming that snapshot's buffer prefix and recording a receipt.
+Later buffered events survive that reconciliation.
+Queue exit zero means acceptance, never handling.
+An ambiguous timeout or failure remains pending and is not blindly resent after restart; existing bounded wedge alarms surface absent handling.
+This provides at-most-once submission attempts with durable ambiguous outcomes, rather than claiming server-side exactly-once execution.
+
+The native queue bypasses terminal keystrokes and the pane composer guard; its busy ordering and draft preservation require native fixture evidence for the supported version pair.
+Normal return stops supervision first, forbids new native submissions once catch-up starts, and reconciles any outstanding handling receipt before closing the return gate.
+A replaced daemon/CLI or unresolved pending submission requires explicit owner reconciliation, not automatic rebinding or lock deletion.
+Archive a stale binding and pending evidence only after the owning Firstmate has classified the original event, retained its durable wake and confirmed that replay cannot duplicate already handled work.
+The helper does not repair that ambiguity automatically.
+
+### Native evidence and current limits
+
+On 2026-10-08, native CLI `0.160.1` and managed app-server `0.161.0` handled an isolated post-final queue event on an owned Unix endpoint.
+The actual Warp coordinator also received a distinct native turn at `13:44:04.547Z`, after its preceding turn completed at `13:44:04.535Z`, and acknowledged the marker.
+Those probes establish native transport viability, not current integration readiness or overnight continuity.
+The native app-server surface is experimental; other version pairs are refused until verified.
+
+The integration's first bounded live fixture failed before binding because its scratch shell selected an asdf `python3` shim without a configured version.
+A single command correction was accepted after the fixture's readiness deadline had already begun CLI cleanup; its binding correctly refused the departed CLI PID.
+No current-helper post-final, busy, draft or restart handling result is claimed from that initial fixture.
+A corrected fixture bound its native target and started the supervisor, but the normal90-second batching interval exceeded its idle handling deadline.
+The exact current helper queued a real post-final event at14:19:59.033Z, with native completion at14:20:06.237Z and marker `HANDLED_idle` during cleanup.
+The supervisor had stopped before completion, leaving its pending journal unreconciled; CLI and daemon exited0.
+That partial handling observation does not convert the failed fixture to a pass or establish busy, draft, duplicate or restart handling.
+The preserved source hashes, native rollout, true command results and cleanup evidence distinguish this failure from the earlier transport probes.
+Run deterministic coverage with `bin/fm-test-run.sh tests/fm-codex-queue.test.sh`.
+The opt-in native fixture is `tests/fm-codex-queue-live-e2e.test.sh`; its required environment is declared in that script.
+Select a runnable Python interpreter in the fixture shell, including an explicit task-local `ASDF_PYTHON_VERSION` when using asdf.
+Do not proceed through a new trust/login prompt or count acceptance as handling.
+Current-source isolated handling proof and a later owner-controlled real-home readiness event remain required before production adoption.
+
+## Alternative terminal launch and preflight
 
 `bin/fm-codex-supervisor.sh --help` owns the command syntax.
 Run `launch` from a dedicated existing tmux shell with explicit `FM_HOME`, `CODEX_HOME`, model, reasoning effort, sandbox mode and approval policy.
@@ -19,15 +66,6 @@ FM_HOME="$OPERATIONAL_HOME" CODEX_HOME="$ACCOUNT_HOME" \
 
 This route requires unrestricted filesystem access and `never` approval; other permission policies are refused.
 The helper requires an explicit model and effort rather than inheriting account defaults or pinning a model in the shared template.
-The captain-authorized personal rollout is:
-
-```sh
-FM_HOME="$OPERATIONAL_HOME" CODEX_HOME=/Users/yewonlee/.codex-personal \
-  bin/fm-codex-supervisor.sh launch \
-  --model gpt-6.1-sol --effort high \
-  --sandbox danger-full-access --ask-for-approval never
-```
-
 The helper supplies root `--no-daemon` on both its capability probe and launch, and uses the installed CLI without installing configuration or changing credentials.
 Its default prompt tells the successor to run normal session-start, reconcile recorded work, run `preflight`, and enter the existing AFK skill.
 A custom prompt must preserve those duties; the disposable verification prompt deliberately uses only scratch lock acquisition and acknowledgement.

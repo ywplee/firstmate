@@ -36,7 +36,10 @@
 #   fm-afk-launch.sh reconcile Close a recorded-but-dead daemon terminal by exact
 #                              id and drop the record (recovery after a crash).
 #
-# Supported backends: herdr, tmux. Others (zellij, orca, cmux) have no verified
+# Supervisor transports: herdr, tmux, codex-queue (fm-codex-queue.py owns binding).
+# Native queue uses detached tmux only to host the existing supervisor daemon;
+# it leaves the coordinator and its managed app-server in their current host.
+# Other backends (zellij, orca, cmux) have no verified
 # non-visible-launch primitive here yet and refuse loudly.
 #
 # Test seam: FM_AFK_LAUNCH_ENTRY overrides the command run in the created
@@ -443,9 +446,17 @@ fm_afk_launch_start() {
   fi
   # Capture the captain pane FIRST, before creating anything.
   captain_target=$(discover_supervisor_target) || {
-    fm_afk_launch_log "no addressable coordinator pane; Desktop foreground checkpoints cannot provide post-turn unattended supervision (see docs/codex-supervision-handoff.md)"; return 1; }
+    fm_afk_launch_log "no verified coordinator target; use native queue binding or a supported pane (see docs/codex-supervision-handoff.md)"; return 1; }
   captain_backend=$(discover_supervisor_backend) || {
     fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"; return 1; }
+
+  if [ "$captain_backend" = codex-queue ]; then
+    if [ -f "$FM_AFK_LAUNCH_STATE/.codex-queue-target.json" ]; then
+      FM_SUPERVISOR_TARGET="$captain_target" python3 "$FM_AFK_LAUNCH_DIR/fm-codex-queue.py" check || return 1
+    else
+      FM_SUPERVISOR_TARGET="$captain_target" python3 "$FM_AFK_LAUNCH_DIR/fm-codex-queue.py" bind || return 1
+    fi
+  fi
 
   mkdir -p "$FM_AFK_LAUNCH_STATE"
 
@@ -489,7 +500,7 @@ fm_afk_launch_start() {
   if [ "$result" -eq 0 ]; then
     case "$captain_backend" in
       herdr) fm_afk_launch_create_herdr "$captain_target" "$captain_backend"; result=$? ;;
-      tmux)  fm_afk_launch_create_tmux "$captain_target" "$captain_backend"; result=$? ;;
+      tmux|codex-queue)  fm_afk_launch_create_tmux "$captain_target" "$captain_backend"; result=$? ;;
       *)
         fm_afk_launch_log "no non-visible daemon-launch primitive for backend '$captain_backend' yet (supported: herdr, tmux)"
         result=1

@@ -109,7 +109,7 @@ family_for_basename() {
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
-    fm-codex-supervisor.test.sh|fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
+    fm-codex-queue.test.sh|fm-codex-supervisor.test.sh|fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
     fm-wake-queue.test.sh|fm-watch-checkpoint.test.sh|fm-watch-triage.test.sh|\
     fm-watcher-lock.test.sh)
@@ -132,7 +132,7 @@ family_for_basename() {
       printf '%s\n' session-bootstrap
       ;;
     fm-afk-pi-herdr-return-e2e.test.sh|fm-claude-continuity-live-e2e.test.sh|\
-    fm-codex-continuity-live-e2e.test.sh|fm-codex-supervisor-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
+    fm-codex-queue-live-e2e.test.sh|fm-codex-continuity-live-e2e.test.sh|fm-codex-supervisor-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
     fm-send-secondmate-marker-herdr-e2e.test.sh)
       printf '%s\n' live-harness-optin
@@ -322,7 +322,7 @@ families_for_changed_path() {
       printf '%s\n' afk
       printf '%s\n' real-herdr-gated
       ;;
-    bin/fm-supervisor-target-lib.sh)
+    bin/fm-supervisor-target-lib.sh|bin/fm-codex-queue.py)
       printf '%s\n' watcher-wake-lock
       printf '%s\n' real-herdr-gated
       printf '%s\n' live-harness-optin

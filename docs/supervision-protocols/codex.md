@@ -14,4 +14,4 @@ When this session owns supervision and away mode is not active:
 Codex cannot reason while a foreground tool call is running.
 The bounded checkpoint returns control regularly so user messages and queued wakes can be handled without relying on background-task wake semantics.
 After a final response, Desktop needs a verified host wake route to restart this loop; a persistent watcher alone cannot wake an unaddressable coordinator.
-For an orderly transfer to terminal-hosted AFK supervision, use `docs/codex-supervision-handoff.md`; this does not change the foreground checkpoint protocol above.
+For native daemon queue AFK supervision or the alternative orderly terminal transfer, use `docs/codex-supervision-handoff.md`; this does not change the foreground checkpoint protocol above.

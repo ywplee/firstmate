@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# fm-supervisor-target-lib.sh - the single owner of supervisor-pane discovery.
+# fm-supervisor-target-lib.sh - supervisor pane or native Codex queue discovery.
+# Native queue discovery follows explicit overrides and supported pane markers.
+# CODEX_THREAD_ID plus CODEX_HOME selects an exact thread candidate; the launcher
+# must bind its owner/socket through fm-codex-queue.py before starting anything.
 #
 # The away-mode daemon (bin/fm-supervise-daemon.sh) must know which pane runs
 # firstmate itself, both to inject escalations into it and, for the daemon, to
@@ -48,6 +51,10 @@ discover_supervisor_target() {
     printf '%s:%s' "${HERDR_SESSION:-default}" "$HERDR_PANE_ID"
     return 0
   fi
+  if [ -n "${CODEX_THREAD_ID:-}" ] && [ -n "${CODEX_HOME:-}" ]; then
+    printf '%s' "$CODEX_THREAD_ID"
+    return 0
+  fi
   printf '%s' "$FM_SUPERVISOR_TARGET_DEFAULT"
   return 1
 }
@@ -73,6 +80,18 @@ discover_supervisor_backend() {
     printf 'herdr'
     return 0
   fi
+  if [ -n "${CODEX_THREAD_ID:-}" ] && [ -n "${CODEX_HOME:-}" ]; then
+    printf 'codex-queue'
+    return 0
+  fi
   printf '%s' "$FM_SUPERVISOR_BACKEND_DEFAULT"
   return 1
+}
+
+fm_supervisor_target_exists() {
+  if [ "$1" = codex-queue ]; then
+    FM_SUPERVISOR_TARGET=$2 python3 "${FM_DAEMON_DIR:-${FM_AFK_LAUNCH_DIR}}/fm-codex-queue.py" check
+  else
+    fm_backend_target_exists "$1" "$2"
+  fi
 }
