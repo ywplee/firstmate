@@ -3,7 +3,6 @@
 
 Usage: FM_HOME=<home> CODEX_HOME=<account-home> fm-codex-queue.py bind|check|flush
 Bind runs in the locked coordinator's tool ancestry with CODEX_THREAD_ID set.
-FM_CODEX_QUEUE_BIN selects the native Codex executable, otherwise the live CLI executable is used.
 FM_CODEX_QUEUE_SOCKET may select an exact Unix socket; otherwise the owner must
 hold exactly one named Unix socket. FM_CODEX_QUEUE_CLI_PID is required for an
 explicit-remote CLI whose daemon is not its child. Only CLI 0.160.1 and daemon
@@ -131,9 +130,7 @@ def bind(home, account, state, thread):
         raise ValueError('lock owner is not the managed Codex daemon')
     cli_pid = int(os.environ.get('FM_CODEX_QUEUE_CLI_PID', str(parent(owner))))
     cli = Path(run(['ps', '-p', str(cli_pid), '-o', 'comm='])).resolve()
-    binary = Path(os.environ.get('FM_CODEX_QUEUE_BIN') or str(cli)).resolve()
-    if binary != cli:
-        raise ValueError('select the exact native executable of the live Codex CLI')
+    binary = cli
     available = sockets(owner)
     socket_path = Path(os.environ['FM_CODEX_QUEUE_SOCKET']).resolve() if os.environ.get('FM_CODEX_QUEUE_SOCKET') else Path(available[0]) if len(available) == 1 else None
     if socket_path is None or str(socket_path) not in available:
@@ -196,16 +193,18 @@ def reconcile(state, data, pending, path):
     if not handled:
         return False
     buf = state / '.subsuper-escalations'
+    receipts = state / '.codex-queue-receipts'
+    retiring = receipts / (pending['id'] + '.buffer')
+    if not retiring.exists():
+        raise ValueError('pending submission lacks buffer retirement identity; manual reconciliation required')
     current = buf.read_text() if buf.exists() else ''
     prefix = pending['buffer']
-    if current.startswith(prefix):
+    if current.startswith(prefix) and os.path.samefile(buf, retiring):
         replace_text(buf, current[len(prefix):])
-        if not buf.stat().st_size:
-            (state / '.subsuper-escalations.since').unlink(missing_ok=True)
-            (state / '.subsuper-inject-wedged').unlink(missing_ok=True)
+    if buf.exists() and not buf.stat().st_size:
+        (state / '.subsuper-escalations.since').unlink(missing_ok=True)
+        (state / '.subsuper-inject-wedged').unlink(missing_ok=True)
     pending.update(handled=handled, target=data)
-    receipts = state / '.codex-queue-receipts'
-    receipts.mkdir(mode=0o700, exist_ok=True)
     save(receipts / (pending['id'] + '.json'), pending)
     path.unlink()
     return True
@@ -250,6 +249,9 @@ def submit(state, data, path):
     message = '\u2063Supervisor escalate (' + str(len(text.splitlines())) + ' event(s)): ' + ' | '.join(text.splitlines())
     message += ' (native queue delivery ' + token + '; pre-read; watcher daemon-managed)'
     pending = dict(id=token, buffer=text, message=message, binding=data, submitted=time.time(), acceptance='unknown')
+    receipts = state / '.codex-queue-receipts'
+    receipts.mkdir(mode=0o700, exist_ok=True)
+    os.link(buf, receipts / (token + '.buffer'))
     save(path, pending)
     argv = [data['binary'], 'queue', '--remote', 'unix://' + data['socket'], '--thread', data['thread'], '--message', message]
     env = os.environ.copy()

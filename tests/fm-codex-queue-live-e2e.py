@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from fm_codex_queue_live_assertions import assert_busy_order
 
 root = Path(sys.argv[1]).resolve()
 evidence = Path(os.environ['FM_CODEX_QUEUE_LIVE_EVIDENCE']).resolve()
@@ -98,6 +99,7 @@ def marker(kind):
     with (home / 'state/.subsuper-escalations').open('a') as stream:
         stream.write(message + '\n')
     (home / 'state/.subsuper-escalations.since').write_text(str(int(time.time())))
+    return message
 
 
 def handled(kind):
@@ -109,7 +111,7 @@ def handled(kind):
 
 
 try:
-    bindings = dict(start=datetime.datetime.now(datetime.timezone.utc).isoformat(), scratch=str(scratch), home=str(home), account=str(account), personal_source=str(source_account), cli=str(cli), daemon=str(daemon_bin), cli_hash=hashlib.sha256(cli.read_bytes()).hexdigest(), daemon_hash=hashlib.sha256(daemon_bin.read_bytes()).hexdigest(), source_hashes={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in [root/'bin/fm-codex-queue.py',root/'bin/fm-afk-launch.sh',root/'bin/fm-supervise-daemon.sh',root/'bin/fm-supervisor-target-lib.sh']})
+    bindings = dict(start=datetime.datetime.now(datetime.timezone.utc).isoformat(), scratch=str(scratch), home=str(home), account=str(account), personal_source=str(source_account), cli=str(cli), daemon=str(daemon_bin), cli_hash=hashlib.sha256(cli.read_bytes()).hexdigest(), daemon_hash=hashlib.sha256(daemon_bin.read_bytes()).hexdigest(), source_hashes={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in [root/'bin/fm-codex-queue.py',root/'bin/fm-afk-launch.sh',root/'bin/fm-supervise-daemon.sh',root/'bin/fm-supervisor-target-lib.sh',root/'tests/fm-codex-queue-live-e2e.py',root/'tests/fm_codex_queue_live_assertions.py']})
     (evidence / 'bindings.json').write_text(json.dumps(bindings, indent=2))
     for executable, expected in [(cli,'codex-cli 0.160.1'),(daemon_bin,'codex-cli 0.161.0')]:
         if not executable.is_file() or not os.access(executable,os.X_OK) or command([str(executable),'--no-daemon','--version']) != expected:
@@ -160,13 +162,18 @@ try:
     time.sleep(0.3)
     command(['tmux','send-keys','-t',pane,'Enter'])
     wait(lambda:(home/'busy-start').exists(),'busy tool start')
-    marker('busy')
+    busy_event = marker('busy')
     time.sleep(1)
     if (home/'handled-busy').exists():
         raise RuntimeError('native queue interrupted the busy turn')
     handled('busy')
     if not (home/'busy-end').exists():
         raise RuntimeError('busy ordering was not preserved')
+    busy_receipts = [json.loads(path.read_text()) for path in (home / 'state/.codex-queue-receipts').glob('*.json')]
+    busy_receipts = [receipt for receipt in busy_receipts if busy_event in receipt['buffer'].splitlines()]
+    if len(busy_receipts) != 1:
+        raise RuntimeError('busy event lacks one exact handling receipt')
+    bindings['busy_order'] = assert_busy_order(native_events(), busy, busy_receipts[0])
     command([str(root/'bin/fm-afk-launch.sh'),'stop'])
     marker('restart')
     launch()

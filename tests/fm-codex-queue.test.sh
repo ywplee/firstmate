@@ -17,6 +17,8 @@ spec = importlib.util.spec_from_file_location('queue_helper', Path(sys.argv[1]) 
 helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
 root = Path(sys.argv.pop())
+sys.path.insert(0, str(root / 'tests'))
+from fm_codex_queue_live_assertions import assert_busy_order
 
 class QueueTests(unittest.TestCase):
     def setUp(self):
@@ -126,6 +128,66 @@ class QueueTests(unittest.TestCase):
         self.assertTrue(helper.flush(self.state, self.data))
         self.assertEqual(buf.read_text(), 'new event\n')
 
+    def retirement_crash(self, phase):
+        with self.accepted():
+            helper.flush(self.state, self.data)
+        path = self.state / '.codex-queue-pending.json'
+        pending = json.loads(path.read_text())
+        buf = self.state / '.subsuper-escalations'
+        with buf.open('a') as stream:
+            stream.write('decision event\n')
+        self.handle(pending['message'])
+        save, unlink = helper.save, Path.unlink
+        receipts = self.state / '.codex-queue-receipts'
+        def interrupted_save(destination, value):
+            if phase == 'receipt' and destination.parent == receipts:
+                raise OSError('crashed before receipt')
+            return save(destination, value)
+        def interrupted_unlink(destination, *args, **kwargs):
+            if phase == 'pending' and destination == path:
+                raise OSError('crashed before pending retirement')
+            return unlink(destination, *args, **kwargs)
+        with patch.object(helper, 'save', side_effect=interrupted_save), patch.object(Path, 'unlink', autospec=True, side_effect=interrupted_unlink):
+            with self.assertRaisesRegex(OSError, 'crashed'):
+                helper.flush(self.state, self.data)
+        self.assertTrue(path.exists())
+        self.assertEqual(buf.read_text(), 'decision event\n')
+        with buf.open('a') as stream:
+            stream.write('decision event\nnew event\n')
+        with self.accepted() as command:
+            self.assertTrue(helper.flush(self.state, self.data))
+            self.assertEqual(command.call_count, 0)
+        self.assertEqual(buf.read_text(), 'decision event\ndecision event\nnew event\n')
+        self.assertFalse(path.exists())
+        self.assertEqual(len(list(receipts.glob('*.json'))), 1)
+        self.assertEqual(json.loads((receipts / (pending['id'] + '.json')).read_text())['handled']['turn'], 'next')
+        with self.accepted() as command:
+            self.assertFalse(helper.flush(self.state, self.data))
+            self.assertEqual(command.call_count, 1)
+        next_pending = json.loads(path.read_text())
+        self.assertNotEqual(next_pending['id'], pending['id'])
+        self.assertEqual(next_pending['buffer'], 'decision event\ndecision event\nnew event\n')
+
+    def test_repeated_events_survive_crash_before_receipt(self):
+        self.retirement_crash('receipt')
+
+    def test_repeated_events_survive_crash_before_pending_retirement(self):
+        self.retirement_crash('pending')
+
+    def test_legacy_pending_without_retirement_identity_preserves_evidence(self):
+        with self.accepted():
+            helper.flush(self.state, self.data)
+        path = self.state / '.codex-queue-pending.json'
+        pending = json.loads(path.read_text())
+        (self.state / '.codex-queue-receipts' / (pending['id'] + '.buffer')).unlink()
+        self.handle(pending['message'])
+        with self.accepted() as command:
+            with self.assertRaisesRegex(ValueError, 'manual reconciliation required'):
+                helper.flush(self.state, self.data)
+            self.assertEqual(command.call_count, 0)
+        self.assertEqual(json.loads(path.read_text()), pending)
+        self.assertEqual((self.state / '.subsuper-escalations').read_text(), pending['buffer'])
+
     def test_return_cannot_begin_between_journal_and_submission(self):
         real_run = subprocess.run
         gate = self.state / '.afk-return-catchup'
@@ -211,6 +273,38 @@ class QueueTests(unittest.TestCase):
             sock.bind(str(endpoint))
             endpoint.chmod(0o600)
             self.assertNotEqual(original, helper.socket_identity(endpoint))
+
+class TurnOrderTests(unittest.TestCase):
+    def setUp(self):
+        self.busy_input = 'busy foreground work'
+        self.receipt = {'message': 'exact queued message', 'handled': {'turn': 'queued-turn'}}
+        self.busy_user = {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'content': [{'text': self.busy_input}], 'internal_chat_message_metadata_passthrough': {'turn_id': 'busy-turn'}}}
+        self.queued_user = {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'content': [{'text': self.receipt['message']}], 'internal_chat_message_metadata_passthrough': {'turn_id': 'queued-turn'}}}
+        self.busy_start = {'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': 'busy-turn'}}
+        self.busy_complete = {'type': 'event_msg', 'payload': {'type': 'task_complete', 'turn_id': 'busy-turn', 'last_agent_message': 'BUSY_FINAL'}}
+        self.queued_start = {'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': 'queued-turn'}}
+        self.queued_complete = {'type': 'event_msg', 'payload': {'type': 'task_complete', 'turn_id': 'queued-turn', 'last_agent_message': 'FINAL_busy'}}
+
+    def test_native_turn_order_accepts_serial_handling(self):
+        items = [self.busy_start, self.busy_user, self.busy_complete, self.queued_start, self.queued_user, self.queued_complete]
+        proof = assert_busy_order(items, self.busy_input, self.receipt)
+        self.assertEqual(proof['busy_turn'], 'busy-turn')
+        self.assertEqual(proof['queued_turn'], 'queued-turn')
+        self.assertLess(proof['busy_complete'], proof['queued_start'])
+
+    def test_late_final_cannot_mask_overlapping_turns(self):
+        items = [self.busy_start, self.busy_user, self.queued_start, self.queued_user, self.busy_complete, self.queued_complete]
+        with self.assertRaisesRegex(ValueError, 'before the busy turn completed'):
+            assert_busy_order(items, self.busy_input, self.receipt)
+
+    def test_missing_or_wrong_turn_evidence_refuses(self):
+        items = [self.busy_start, self.busy_user, self.busy_complete, self.queued_start, self.queued_user, self.queued_complete]
+        for removed in [self.busy_user, self.busy_start, self.busy_complete, self.queued_start, self.queued_user]:
+            with self.subTest(removed=removed):
+                with self.assertRaises(ValueError):
+                    assert_busy_order([item for item in items if item != removed], self.busy_input, self.receipt)
+        with self.assertRaisesRegex(ValueError, 'exact native input'):
+            assert_busy_order(items, self.busy_input, dict(self.receipt, message='unrelated input'))
 
 unittest.main()
 PY
