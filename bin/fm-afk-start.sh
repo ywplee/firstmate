@@ -2,7 +2,8 @@
 # Enter away mode and run the sub-supervisor daemon in a harness-tracked
 # foreground process when one is not already alive.
 #
-# Usage: fm-afk-start.sh
+# Usage: fm-afk-start.sh [--normal]
+#   --normal requires the owner's enabled native queue binding and never sets .afk.
 #   Sets state/.afk unless FM_AFK_STATE_PREPARED=1, checks
 #   state/.supervise-daemon.lock, and:
 #     - prints "afk: daemon already running pid=<pid>" then exits 0 when that
@@ -117,13 +118,15 @@ daemon_lock_held_by_live_daemon() {
 
 fm_afk_start_main() {
   case "${1:-}" in
-    '' ) ;;
+    ''|--normal ) ;;
     -h|--help) fm_afk_start_usage; return 0 ;;
     * ) echo "usage: $(basename "${BASH_SOURCE[1]:-fm-afk-start.sh}")" >&2; return 2 ;;
   esac
 
   mkdir -p "$FM_AFK_STATE"
-  if [ "${FM_AFK_STATE_PREPARED:-0}" = 1 ]; then
+  if [ "${1:-}" = --normal ]; then
+    python3 "$FM_AFK_START_DIR/fm-codex-queue.py" active || return 1
+  elif [ "${FM_AFK_STATE_PREPARED:-0}" = 1 ]; then
     [ -f "$FM_AFK_STATE/.afk" ] || { echo "afk: launcher-prepared state is missing" >&2; return 1; }
   else
     date '+%s' > "$FM_AFK_STATE/.afk"
@@ -142,7 +145,7 @@ fm_afk_start_main() {
 
   # Fresh start: clear the previous away session's stale delivery artifacts
   # before the new daemon can surface them (fix for the leaked-artifact defect).
-  if [ "${FM_AFK_STATE_PREPARED:-0}" != 1 ]; then
+  if [ "${1:-}" != --normal ] && [ "${FM_AFK_STATE_PREPARED:-0}" != 1 ]; then
     fm_afk_clear_stale_artifacts "$FM_AFK_STATE"
   fi
 

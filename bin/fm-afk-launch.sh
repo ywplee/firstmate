@@ -29,6 +29,12 @@
 #   fm-afk-launch.sh start-native
 #                              Prepare lifecycle state for a harness-native
 #                              background job and record that no terminal exists.
+#   fm-afk-launch.sh start-normal
+#                              Owner-only native queue enable and singleton launch
+#                              without entering away mode; reuses a live singleton.
+#   fm-afk-launch.sh stop-normal
+#                              Owner-only normal disable and singleton shutdown;
+#                              refuses while away mode or return catch-up is active.
 #   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
 #                              cleanup flushes WHILE state/.afk is still present,
 #                              wait for it, close the recorded terminal by exact
@@ -423,6 +429,7 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
   entry=$(fm_afk_launch_entry_cmd)
   cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
     "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
+  if [ "${3:-}" = normal ]; then cmd="$cmd --normal"; fi
   if ! fm_afk_launch_record_write tmux "$session" ""; then
     fm_afk_launch_log "failed to persist planned tmux daemon session '$session'"
     return 1
@@ -456,6 +463,18 @@ fm_afk_launch_start() {
     else
       FM_SUPERVISOR_TARGET="$captain_target" python3 "$FM_AFK_LAUNCH_DIR/fm-codex-queue.py" bind || return 1
     fi
+  fi
+
+  if [ "${1:-}" = normal ]; then
+    [ "$captain_backend" = codex-queue ] || return 1
+    FM_SUPERVISOR_TARGET="$captain_target" python3 "$FM_AFK_LAUNCH_DIR/fm-codex-queue.py" enable || return 1
+    if daemon_lock_held_by_live_daemon; then
+      fm_afk_launch_record_validate_if_present
+      return
+    fi
+    fm_afk_launch_reconcile || return 1
+    fm_afk_launch_create_tmux "$captain_target" "$captain_backend" normal
+    return
   fi
 
   mkdir -p "$FM_AFK_LAUNCH_STATE"
@@ -624,6 +643,10 @@ fm_afk_launch_main() {
   trap 'exit 143' TERM
   case "${1:-start}" in
     start) fm_afk_launch_start ;;
+    start-normal) fm_afk_launch_start normal ;;
+    stop-normal)
+      [ ! -e "$FM_AFK_LAUNCH_STATE/.afk" ] && python3 "$FM_AFK_LAUNCH_DIR/fm-codex-queue.py" disable && fm_afk_launch_stop
+      ;;
     start-native) fm_afk_launch_start_native ;;
     stop) fm_afk_launch_stop ;;
     reconcile) fm_afk_launch_reconcile ;;

@@ -33,7 +33,23 @@ python_bin = Path(sys.executable).resolve()
 cli = Path(os.environ['FM_CODEX_QUEUE_LIVE_CLI']).resolve()
 daemon_bin = Path(os.environ['FM_CODEX_QUEUE_LIVE_DAEMON']).resolve()
 source_account = Path(os.environ['CODEX_HOME']).resolve()
-protected = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in [source_account / 'auth.json', source_account / 'config.toml'] if p.exists()}
+def protected_identity():
+    paths = [source_account / 'auth.json', source_account / 'config.toml', source_account / 'skills']
+    if (source_account / 'skills').is_dir():
+        paths.extend(sorted((source_account / 'skills').rglob('*')))
+    values = {}
+    for path in paths:
+        if not path.exists() and not path.is_symlink():
+            values[str(path)] = None
+            continue
+        info = path.lstat()
+        values[str(path)] = dict(device=info.st_dev, inode=info.st_ino, mode=info.st_mode,
+                                 link=os.readlink(path) if path.is_symlink() else None,
+                                 hash=hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None)
+    return values
+
+
+protected = protected_identity()
 shutil.copyfile(source_account / 'auth.json', account / 'auth.json')
 (account / 'auth.json').chmod(0o600)
 (account / 'config.toml').write_text('model="gpt-6.1-sol"\nmodel_reasoning_effort="high"\nproject_doc_max_bytes=0\n[projects.' + json.dumps(str(home)) + ']\ntrust_level="trusted"\n')
@@ -114,15 +130,46 @@ def final(text):
     return any(item.get('type') == 'event_msg' and item.get('payload',{}).get('type') == 'task_complete' and item['payload'].get('last_agent_message') == text for item in native_events())
 
 
-def launch():
-    command([str(root / 'bin/fm-afk-launch.sh'),'start'])
-    wait(lambda:(home / 'state/.supervise-daemon.lock/pid').exists(),'supervisor singleton')
+def owner_command(argv, label):
+    script = home / (label + '.sh')
+    result = home / (label + '.exit')
+    keys = ['PATH', 'FM_HOME', 'FM_SUPERVISOR_BACKEND', 'FM_SUPERVISOR_TARGET', 'FM_AFK_LAUNCH_ENTRY', 'FM_GATE_REFUSE_BYPASS', 'ASDF_PYTHON_VERSION']
+    script.write_text('export ' + shlex.join([key + '=' + env[key] for key in keys if key in env]) + '\n' + shlex.join(argv) + ' > ' + shlex.quote(str(home / (label + '.output'))) + ' 2>&1\nprintf "%s" "$?" > ' + shlex.quote(str(result)) + '\n')
+    prompt = 'Run exactly bash ' + shlex.quote(str(script)) + '; do no other work; finish with exactly FINAL_' + label
+    command(['tmux', 'send-keys', '-t', pane, '-l', prompt])
+    time.sleep(0.3)
+    command(['tmux', 'send-keys', '-t', pane, 'Enter'])
+    wait(lambda:final('FINAL_' + label) and result.exists(), label + ' owner action')
+    if result.read_text() != '0':
+        raise RuntimeError('owner action failed: ' + label + ': ' + (home / (label + '.output')).read_text()[:400])
 
 
-def marker(kind):
+def launch(normal=False, label='normal-start'):
+    if normal:
+        owner_command([str(root / 'bin/fm-afk-launch.sh'), 'start-normal'], label)
+    else:
+        command([str(root / 'bin/fm-afk-launch.sh'),'start'])
+    def owned_lock(name):
+        lock = home / ('state/' + name)
+        try:
+            pid = int((lock / 'pid').read_text())
+            recorded = (lock / 'pid-identity').read_text().strip()
+            if process_identity(pid) == recorded:
+                return dict(pid=pid, identity=recorded)
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            return None
+        return None
+    bindings.setdefault('supervisors', []).append(wait(lambda:owned_lock('.supervise-daemon.lock'), 'supervisor singleton'))
+    bindings.setdefault('watchers', []).append(wait(lambda:owned_lock('.watch.lock'), 'owned watcher'))
+    (evidence / 'bindings.json').write_text(json.dumps(bindings, indent=2))
+    print('owned supervisor and watcher:', bindings['supervisors'][-1], bindings['watchers'][-1], flush=True)
+
+
+def marker(kind, append=True):
     (home / ('handled-' + kind)).unlink(missing_ok=True)
     message = 'Harmless fixture event ' + kind + ': use a shell to append exactly HANDLED_' + kind + ' and a newline to handled-' + kind + ' in this directory; perform no other work; finish with exactly FINAL_' + kind
-    command(['bash', '-c', '. "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-supervise-daemon.sh"; escalate_add "$FM_HOME/state" "$2"', '_', str(root), message])
+    if append:
+        command(['bash', '-c', '. "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-supervise-daemon.sh"; escalate_add "$FM_HOME/state" "$2"', '_', str(root), message])
     return message
 
 
@@ -149,7 +196,12 @@ def handled(kind):
 
 
 try:
-    bindings = dict(start=datetime.datetime.now(datetime.timezone.utc).isoformat(), scratch=str(scratch), home=str(home), account=str(account), personal_source=str(source_account), cli=str(cli), daemon=str(daemon_bin), cli_hash=hashlib.sha256(cli.read_bytes()).hexdigest(), daemon_hash=hashlib.sha256(daemon_bin.read_bytes()).hexdigest(), source_hashes={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in [root/'bin/fm-codex-queue.py',root/'bin/fm-afk-launch.sh',root/'bin/fm-supervise-daemon.sh',root/'bin/fm-supervisor-target-lib.sh',root/'tests/fm-codex-queue-live-e2e.py',root/'tests/fm_codex_queue_live_assertions.py']})
+    bindings = dict(start=datetime.datetime.now(datetime.timezone.utc).isoformat(), scratch=str(scratch), home=str(home), account=str(account), personal_source=str(source_account), cli=str(cli), daemon=str(daemon_bin), cli_hash=hashlib.sha256(cli.read_bytes()).hexdigest(), daemon_hash=hashlib.sha256(daemon_bin.read_bytes()).hexdigest(), source_hashes={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in [root/'bin/fm-codex-queue.py',root/'bin/fm-afk-launch.sh',root/'bin/fm-afk-start.sh',root/'bin/fm-afk-return.sh',root/'bin/fm-watch.sh',root/'bin/fm-supervise-daemon.sh',root/'bin/fm-supervisor-target-lib.sh',root/'tests/fm-codex-queue-live-e2e.py',root/'tests/fm_codex_queue_live_assertions.py']})
+    bindings['head'] = command(['git', '-C', str(root), 'rev-parse', 'HEAD'])
+    diff = command(['git', '-C', str(root), 'diff', '--binary', 'HEAD'])
+    (evidence / 'source.diff').write_text(diff)
+    bindings['diff_hash'] = hashlib.sha256(diff.encode()).hexdigest()
+    bindings['protected_before'] = protected
     (evidence / 'bindings.json').write_text(json.dumps(bindings, indent=2))
     for executable, expected in [(cli,'codex-cli 0.160.1'),(daemon_bin,'codex-cli 0.161.0')]:
         if not executable.is_file() or not os.access(executable,os.X_OK) or command([str(executable),'--no-daemon','--version']) != expected:
@@ -160,7 +212,10 @@ try:
     command(['git','init','-q',str(home)])
     bindings['python']=str(python_bin)
     bindings['python_version']=command([str(python_bin),'--version'])
-    daemon = subprocess.Popen([str(daemon_bin),'--no-daemon','app-server','--listen','unix://' + str(endpoint),'--managed-daemon','-c','features.api_key_model_discovery=false','-c','features.auth_elicitation=true','-c','features.code_mode_host=true','-c','features.mcp_oauth_refresh_coordination=false'],env=env,cwd=home,stdout=(evidence/'daemon.stdout').open('w'),stderr=(evidence/'daemon.stderr').open('w'))
+    bindings['daemon_argv'] = [str(daemon_bin),'--no-daemon','app-server','--listen','unix://' + str(endpoint),'--managed-daemon','-c','features.api_key_model_discovery=false','-c','features.auth_elicitation=true','-c','features.code_mode_host=true','-c','features.mcp_oauth_refresh_coordination=false']
+    (evidence / 'bindings.json').write_text(json.dumps(bindings, indent=2))
+    print('source:', bindings['head'], bindings['diff_hash'], 'deadline:', deadline + 120, 'socket:', endpoint, 'daemon argv:', bindings['daemon_argv'], flush=True)
+    daemon = subprocess.Popen(bindings['daemon_argv'],env=env,cwd=home,stdout=(evidence/'daemon.stdout').open('w'),stderr=(evidence/'daemon.stderr').open('w'))
     bindings['daemon_identity'] = process_identity(daemon.pid)
     bindings['daemon_pid'] = daemon.pid
     (evidence/'bindings.json').write_text(json.dumps(bindings, indent=2))
@@ -187,6 +242,7 @@ try:
     bindings.update(daemon_pid=daemon.pid,pane=pane)
     bindings['cli_argv'] = argv
     (evidence/'bindings.json').write_text(json.dumps(bindings,indent=2))
+    print('CLI argv:', argv, flush=True)
     print('owned tmux:', bindings['tmux_pid'], bindings['tmux_identity'], flush=True)
     command(['tmux','pipe-pane','-t',pane,'cat > ' + shlex.quote(str(evidence/'cli.stdout'))])
     command(['tmux','send-keys','-t',pane,'-l','exec ' + shlex.quote(str(launch_file))])
@@ -223,12 +279,46 @@ try:
     (fakebin / 'python3').write_text('#!/bin/sh\nif [ "$1" = ' + shlex.quote(str(root / 'bin/fm-codex-queue.py')) + ' ]; then exec ' + shlex.join([str(python_bin), str(fault)]) + ' "$@"; fi\nexec ' + shlex.quote(str(python_bin)) + ' "$@"\n')
     (fakebin / 'python3').chmod(0o700)
     daemon_entry = scratch / 'daemon-entry.sh'
-    daemon_entry.write_text('#!/bin/sh\nexec env ' + shlex.join([key + '=' + env[key] for key in ['PATH','FM_ESCALATE_BATCH_SECS','FM_HOUSEKEEPING_TICK','FM_POLL','FM_HEARTBEAT','FM_MAX_DEFER_SECS','FM_WEDGE_ALARM_EXEC','FM_GATE_REFUSE_BYPASS','ASDF_PYTHON_VERSION'] if key in env]) + ' ' + shlex.quote(str(root / 'bin/fm-afk-start.sh')) + '\n')
+    daemon_entry.write_text('#!/bin/sh\nexec env ' + shlex.join([key + '=' + env[key] for key in ['PATH','FM_ESCALATE_BATCH_SECS','FM_HOUSEKEEPING_TICK','FM_POLL','FM_HEARTBEAT','FM_MAX_DEFER_SECS','FM_WEDGE_ALARM_EXEC','FM_GATE_REFUSE_BYPASS','ASDF_PYTHON_VERSION'] if key in env]) + ' ' + shlex.quote(str(root / 'bin/fm-afk-start.sh')) + ' "$@"\n')
     daemon_entry.chmod(0o700)
     env['FM_AFK_LAUNCH_ENTRY'] = str(daemon_entry)
     bindings.update(thread=thread,target=target)
     (evidence/'bindings.json').write_text(json.dumps(bindings,indent=2))
-    launch()
+    launch(normal=True)
+    if (home / 'state/.afk').exists():
+        raise RuntimeError('normal supervision created a fake AFK flag')
+    worker_script = home / 'worker-event.sh'
+    worker_event = marker('normal-worker', append=False)
+    worker_script.write_text('while [ ! -f worker-identity-recorded ]; do sleep 0.2; done\nprintf "%s\\n" ' + shlex.quote('blocked [key=normal-worker]: ' + worker_event) + ' >> ' + shlex.quote(str(home / 'state/native-worker.status')) + '\n')
+    worker_argv = [str(cli), '--no-daemon', '--ask-for-approval', 'never', 'exec', '--model', 'gpt-6.1-sol', '-c', 'model_reasoning_effort="high"', '--sandbox', 'danger-full-access', '-C', str(home), 'Run exactly bash worker-event.sh. Do no other work. Finish with exactly WORKER_BLOCKED.']
+    worker_file = scratch / 'worker.sh'
+    worker_file.write_text('#!/bin/sh\n' + shlex.join(['env', 'CODEX_HOME=' + str(account), 'FM_HOME=' + str(home)] + worker_argv) + ' > ' + shlex.quote(str(evidence / 'worker.stdout')) + ' 2> ' + shlex.quote(str(evidence / 'worker.stderr')) + ' &\nworker_pid=$!\nprintf "%s" "$worker_pid" > ' + shlex.quote(str(scratch / 'worker.pid')) + '\nwait "$worker_pid"\nprintf "%s" "$?" > ' + shlex.quote(str(home / 'worker.exit')) + '\n')
+    worker_file.chmod(0o700)
+    worker_pane = command(['tmux', 'new-session', '-d', '-P', '-F', '#{pane_id}', '-s', 'fm-native-worker', '/bin/bash --noprofile --norc -i'])
+    worker_pid = int(command(['tmux', 'display-message', '-p', '-t', worker_pane, '#{pane_pid}']))
+    bindings['worker'] = dict(pane=worker_pane, pid=worker_pid, identity=process_identity(worker_pid), argv=worker_argv)
+    (evidence / 'bindings.json').write_text(json.dumps(bindings, indent=2))
+    print('owned worker:', bindings['worker'], flush=True)
+    (home / 'state/native-worker.meta').write_text('window=' + worker_pane + '\nbackend=tmux\nharness=codex\nkind=ship\n')
+    command(['tmux', 'send-keys', '-t', worker_pane, '-l', 'exec ' + shlex.quote(str(worker_file))])
+    command(['tmux', 'send-keys', '-t', worker_pane, 'Enter'])
+    wait(lambda:(scratch / 'worker.pid').exists(), 'worker process created', 10)
+    worker_cli_pid = int((scratch / 'worker.pid').read_text())
+    wait(lambda:subprocess.check_output(['ps', '-p', str(worker_cli_pid), '-o', 'comm='], text=True).strip() == str(cli), 'native worker exec', 10)
+    bindings['worker'].update(cli_pid=worker_cli_pid, cli_identity=process_identity(worker_cli_pid))
+    (evidence / 'bindings.json').write_text(json.dumps(bindings, indent=2))
+    print('owned native worker:', bindings['worker'], flush=True)
+    (home / 'worker-identity-recorded').touch()
+    handled('normal-worker')
+    wait(lambda:(home / 'worker.exit').exists(), 'scratch worker synchronous result')
+    if (home / 'worker.exit').read_text() != '0':
+        raise RuntimeError('scratch worker failed')
+    (home / 'state/native-worker.status').write_text('resolved [key=normal-worker]: harmless fixture handled\n')
+    if not (home / 'state/.wake-queue').exists() or worker_event not in (home / 'state/.supervise-daemon.log').read_text():
+        raise RuntimeError('normal worker event did not pass through actual watcher and classifier')
+    if (home / 'state/.afk').exists():
+        raise RuntimeError('worker delivery required AFK')
+    bindings['normal_worker'] = dict(after_final=True, afk_absent=True, watcher_classified=True)
     marker('idle')
     handled('idle')
     if diagnostic:
@@ -272,7 +362,7 @@ try:
     wait(lambda:final('FINAL_busy'), 'original queued turn completes while supervision is stopped')
     if not pending_path.exists() or json.loads(pending_path.read_text()) != restart_pending:
         raise RuntimeError('pending delivery was reconciled before supervisor restart')
-    launch()
+    launch(normal=True, label='normal-restart')
     handled('busy')
     handled('restart')
     if not (home/'busy-end').exists():
@@ -283,6 +373,22 @@ try:
     if len(busy_receipts) != 1:
         raise RuntimeError('busy event lacks one exact handling receipt')
     bindings['busy_order'] = assert_busy_order(native_events(), busy, busy_receipts[0])
+    owner_command([str(root / 'bin/fm-afk-launch.sh'), 'stop-normal'], 'normal-disable')
+    disabled_event = marker('disabled')
+    attempts_path = evidence / 'queue-attempts.jsonl'
+    attempts_before_disable = attempts_path.read_text()
+    time.sleep(3)
+    if (home / 'handled-disabled').exists() or attempts_path.read_text() != attempts_before_disable or (home / 'state/.codex-queue-normal.json').exists() or (home / 'state/.supervise-daemon.lock').exists():
+        raise RuntimeError('explicit normal disable left submission active')
+    launch(normal=True, label='normal-reenable')
+    handled('disabled')
+    if disabled_event not in (home / 'state/.codex-queue-receipts' / (bindings['handling']['disabled']['id'] + '.json')).read_text():
+        raise RuntimeError('disable lost the buffered event')
+    normal_pid = int((home / 'state/.supervise-daemon.lock/pid').read_text())
+    launch()
+    if int((home / 'state/.supervise-daemon.lock/pid').read_text()) != normal_pid or not (home / 'state/.afk').exists():
+        raise RuntimeError('AFK entry did not reuse the owned normal singleton')
+    bindings['normal_disable_and_afk_reuse'] = dict(disabled=True, buffered_event_preserved=True, reused_pid=normal_pid)
     return_script = home / 'pending-return.sh'
     return_script.write_text('export FM_HOME=' + shlex.quote(str(home)) + ' FM_SUPERVISOR_TARGET=' + shlex.quote(thread) + '\nprintf started > return-start\nwhile [ ! -f return-request ]; do sleep 0.2; done\n' + shlex.quote(str(root/'bin/fm-afk-return.sh')) + ' > return-begin.txt 2>&1\nprintf "%s" "$?" > return-begin.exit\nwhile [ ! -f return-release ]; do sleep 0.2; done\nprintf ended > return-end\n')
     busy_return = 'Run exactly bash pending-return.sh in this scratch directory; do no other work; finish with exactly RETURN_BUSY_FINAL.'
@@ -331,7 +437,26 @@ try:
     bindings['pending_return'] = dict(begin_exit=3, check_exit=0, later_event_caught_up=True, new_submissions=0)
     if (home/'state/.afk').exists() or (home/'state/.supervise-daemon.lock').exists():
         raise RuntimeError('orderly return left supervision active')
-    bindings['verdict']='PASS: exact binding, refusals, post-final, draft, busy ordering, pending restart, ambiguous acceptance and pending return'
+    if (home / 'state/.codex-queue-normal.json').exists():
+        raise RuntimeError('genuine AFK return left normal mode armed')
+    launch(normal=True, label='normal-rearm')
+    marker('rearmed')
+    handled('rearmed')
+    command(['tmux', 'send-keys', '-t', pane, '-l', '/quit'])
+    time.sleep(0.3)
+    command(['tmux', 'send-keys', '-t', pane, 'Enter'])
+    stop = min(deadline, time.time() + 20)
+    while time.time() < stop and (not (scratch / 'cli.exit').exists() or (home / 'state/.supervise-daemon.lock').exists()):
+        time.sleep(0.2)
+    if not (scratch / 'cli.exit').exists() or (home / 'state/.supervise-daemon.lock').exists():
+        raise RuntimeError('normal singleton did not stop after exact CLI owner exit')
+    marker('owner-exit')
+    command([str(python_bin), str(root / 'bin/fm-codex-queue.py'), 'check'], expected=1)
+    command([str(python_bin), str(root / 'bin/fm-codex-queue.py'), 'flush'], expected=1)
+    if (home / 'handled-owner-exit').exists() or not (home / 'state/.codex-queue-normal.json').exists():
+        raise RuntimeError('departed owner was replaced or ownership evidence discarded')
+    bindings['normal_rearm_and_exit'] = dict(owner_rearmed=True, exact_cli_exit=int((scratch / 'cli.exit').read_text()), singleton_stopped=True, owner_exit_refused=True)
+    bindings['verdict']='PASS: normal watcher delivery, disable/rearm, owner exit, AFK reuse/return, exact binding, post-final, draft, busy ordering, pending restart and ambiguous acceptance'
 except DiagnosticComplete:
     bindings['verdict']='PASS: limited native startup, binding/check and one post-final receipt; full lifecycle remains untested'
 except Exception as error:
@@ -383,7 +508,8 @@ finally:
             target=json.loads((home/'state/.codex-queue-target.json').read_text())
             shutil.copyfile(target['rollout'], evidence/'native-rollout.jsonl')
         shutil.copytree(home, evidence/'home',dirs_exist_ok=True)
-        bindings['protected_source_unchanged']=all(p.exists() and hashlib.sha256(p.read_bytes()).hexdigest()==value for p,value in protected.items())
+        bindings['protected_after'] = protected_identity()
+        bindings['protected_source_unchanged'] = bindings['protected_after'] == protected
         if not bindings['protected_source_unchanged']:
             bindings['verdict']='FAIL: protected source changed'
     except Exception as error:
@@ -404,5 +530,9 @@ finally:
     (evidence/'receipt.json').write_text(json.dumps(bindings,indent=2))
     print(bindings.get('verdict','FAIL'))
     print('evidence:',evidence)
-    print('scratch retained without credential:',scratch)
+    if 'cleanup_errors' not in bindings and bindings.get('protected_source_unchanged'):
+        shutil.rmtree(scratch)
+        bindings['scratch_removed'] = not scratch.exists()
+        (evidence/'receipt.json').write_text(json.dumps(bindings,indent=2))
+    print('scratch removed:',bindings.get('scratch_removed', False))
 sys.exit(0 if bindings.get('verdict','').startswith('PASS') and 'cleanup_errors' not in bindings else 1)

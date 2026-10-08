@@ -12,10 +12,11 @@
 # batch window.
 #
 # PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine: it
-# injects ONLY when the durable away-mode flag state/.afk is present. Invoking
+# Pane injection requires the durable away-mode flag state/.afk. Invoking
 # the /afk skill sets that flag and starts this daemon; any real (unmarked)
 # user message clears it and firstmate resumes full responsiveness.
-# When afk is off, normal fm-watch.sh always-on triage is the active mechanism.
+# Native queue normal ownership is enabled through fm-afk-launch.sh start-normal.
+# Otherwise, when afk is off, fm-watch.sh always-on triage is the active mechanism.
 # Any buffered daemon escalations that remain while afk is off survive in
 # state/.subsuper-escalations and are flushed on the next "while you were out"
 # catch-up or when afk is re-entered.
@@ -246,6 +247,14 @@ _hash_text() {
 # afk_active: 0 if the durable away-mode flag exists, 1 otherwise.
 afk_active() {  # <state>
   [ -e "$1/$AFK_FLAG_NAME" ]
+}
+
+supervision_active() {
+  local state=$1
+  [ ! -e "$state/.afk-return-catchup" ] || return 1
+  afk_active "$state" && return 0
+  [ "${FM_SUPERVISOR_BACKEND:-}" = codex-queue ] || return 1
+  python3 "$FM_DAEMON_DIR/fm-codex-queue.py" active >/dev/null 2>&1
 }
 
 # afk_enter / afk_exit: write/clear the away-mode flag. Called by the /afk
@@ -965,7 +974,7 @@ housekeeping() {  # <state>
   # retry the normal delivery path. If that still cannot confirm, raise a loud
   # wedge alarm while preserving the buffer.
   max_defer=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
-  if afk_active "$state" && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
+  if [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ] && supervision_active "$state"; then
     oldest=$(_oldest_line_age "$state/.subsuper-escalations")
     # Throttle the alarm to once per max-defer window (the wedge marker doubles
     # as the throttle). A successful flush clears the buffer; a failed one alarms
@@ -1453,6 +1462,10 @@ fm_super_main() {
     # Catch-up signals persist in state/*.status and flow on the next run, so
     # this delays rather than loses work.
     if ! fm_supervisor_target_exists "$BACKEND" "$TARGET"; then
+      if [ "$BACKEND" = codex-queue ] && [ -e "$STATE/.codex-queue-normal.json" ] && ! afk_active "$STATE"; then
+        log "normal supervisor owner departed; preserving delivery state and stopping"
+        cleanup
+      fi
       log "warn: supervisor target '$TARGET' gone; backing off ${INJECT_FAIL_SLEEP}s, will retry"
       # Flush is pointless with no pane; preserve any buffered escalations.
       if [ "$BACKEND" = codex-queue ]; then housekeeping "$STATE"; fi

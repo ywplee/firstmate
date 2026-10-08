@@ -64,6 +64,7 @@ test_return_gate_orders_catchup_before_bearings() {
   install_runner "$dir"
   seed_live_blocker "$dir" herdr synthetic-dependency
   date +%s > "$dir/home/state/.afk"
+  printf '{"owner":42}\n' > "$dir/home/state/.codex-queue-normal.json"
   printf 'repair-task.status: blocked synthetic dependency\n' > "$dir/home/state/.subsuper-escalations"
   printf 'fm away-mode inject WEDGED: 4555s undelivered\n' > "$dir/home/state/.subsuper-inject-wedged"
   {
@@ -78,6 +79,7 @@ test_return_gate_orders_catchup_before_bearings() {
   [ "$rc" -eq 3 ] || fail "return begin should gate on a live blocker (rc=$rc): $out"
   gate="$dir/home/state/.afk-return-catchup"
   [ -s "$gate" ] || fail "return begin did not persist its fail-closed catch-up gate"
+  [ ! -e "$dir/home/state/.codex-queue-normal.json" ] || fail "genuine return left normal supervision armed"
   assert_contains "$out" 'firstmate-actionable blocker: repair-task [key=synthetic-dependency]' "return output did not assign blocker remediation to Firstmate"
   grep -F $'evidence\twake\t1784074271' "$gate" >/dev/null || fail "drained wake evidence was not retained in the durable gate"
   grep -F $'evidence\twake\twake annotation: latest wake-EVENT observed at drain, not current state: repair-task.status: blocked synthetic dependency' "$gate" >/dev/null \

@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Bind a daemon-backed Codex coordinator and reconcile native queue delivery.
 
-Usage: FM_HOME=<home> CODEX_HOME=<account-home> fm-codex-queue.py bind|check|flush
+Usage: FM_HOME=<home> CODEX_HOME=<account-home> fm-codex-queue.py bind|check|flush|enable|disable|active
 Bind runs in the locked coordinator's tool ancestry with CODEX_THREAD_ID set.
 FM_CODEX_QUEUE_SOCKET may select an exact Unix socket; otherwise the owner must
 hold exactly one named Unix socket. FM_CODEX_QUEUE_CLI_PID is required for an
 explicit-remote CLI whose daemon is not its child. Only CLI 0.160.1 and daemon
 0.161.0 have empirical evidence. The binding refuses other versions.
-Check is read-only. Flush requires .afk and the existing supervisor singleton;
+Check and active are read-only. Enable/disable require owning coordinator ancestry.
+Enable binds normal supervision to the checked target after return catch-up.
+Flush requires .afk or the matching normal binding and the existing singleton;
 it journals once before codex queue, then waits for exact-input native turn
 completion before removing the corresponding escalation-buffer prefix.
 Acceptance and ambiguous exits never mean handling, and are never blindly
@@ -288,8 +290,28 @@ def flush_locked(state, data):
         return submit(state, data, path)
 
 
+def normal_active(state, data):
+    path = state / '.codex-queue-normal.json'
+    return path.exists() and json.loads(path.read_text()) == data
+
+
+def normal_control(state, data, enabled):
+    if not ancestor(data['owner']):
+        raise ValueError('only the owning coordinator may enable or disable normal supervision')
+    with state_lock(state, '.afk-return-catchup.lock', wait=False) as acquired:
+        if not acquired or (state / '.afk-return-catchup').exists():
+            raise ValueError('return catch-up must resolve before changing normal supervision')
+        if enabled and (state / '.afk').exists():
+            raise ValueError('away mode must return before enabling normal supervision')
+        path = state / '.codex-queue-normal.json'
+        if enabled:
+            save(path, data)
+        else:
+            path.unlink(missing_ok=True)
+
+
 def submit(state, data, path):
-    if not (state / '.afk').exists() or (state / '.afk-return-catchup').exists():
+    if (state / '.afk-return-catchup').exists() or not ((state / '.afk').exists() or normal_active(state, data)):
         return False
     owner = state / '.supervise-daemon.lock'
     pid = int((owner / 'pid').read_text())
@@ -320,8 +342,8 @@ def submit(state, data, path):
 
 
 def main():
-    if len(sys.argv) != 2 or sys.argv[1] not in ['bind', 'check', 'flush']:
-        raise ValueError('usage: fm-codex-queue.py bind|check|flush')
+    if len(sys.argv) != 2 or sys.argv[1] not in ['bind', 'check', 'flush', 'enable', 'disable', 'active']:
+        raise ValueError('usage: fm-codex-queue.py bind|check|flush|enable|disable|active')
     if not os.environ.get('FM_HOME') or os.environ.get('FM_STATE_OVERRIDE') or os.environ.get('FM_ROOT_OVERRIDE'):
         raise ValueError('explicit FM_HOME without root/state overrides is required')
     home = Path(os.environ['FM_HOME']).resolve(strict=True)
@@ -335,6 +357,10 @@ def main():
         print('native queue: exact coordinator bound; handling proof still required')
     else:
         data = check(home, state, thread)
+        if sys.argv[1] in ['enable', 'disable']:
+            normal_control(state, data, sys.argv[1] == 'enable')
+        if sys.argv[1] == 'active' and ((state / '.afk-return-catchup').exists() or not normal_active(state, data)):
+            return 1
         if sys.argv[1] == 'flush' and not flush(state, data):
             print('native queue: pending handling receipt; submission will not be repeated', file=sys.stderr)
             return 1

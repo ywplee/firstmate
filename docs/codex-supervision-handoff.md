@@ -30,6 +30,22 @@ A replaced daemon/CLI or unresolved pending submission requires explicit owner r
 Archive a stale binding and pending evidence only after the owning Firstmate has classified the original event, retained its durable wake and confirmed that replay cannot duplicate already handled work.
 The helper does not repair that ambiguity automatically.
 
+### Normal ownership
+
+After binding, the owning coordinator may run `bin/fm-afk-launch.sh start-normal` to keep the same supervisor and watcher eligible across final responses without setting `state/.afk`.
+This requires the checked native binding and refuses unresolved return catch-up; a live singleton is reused rather than replaced.
+While normal ownership is enabled, let that singleton own the watcher and reconcile its delivered events in the exact native coordinator.
+Do not arm a foreground watcher concurrently.
+Owner-only `bin/fm-afk-launch.sh stop-normal` disables submission before orderly shutdown and preserves buffered events; it refuses while away mode or return catch-up is active.
+Entering AFK reuses the singleton, and genuine return stops it and disarms normal ownership before completing catch-up.
+Only the owning coordinator may rearm normal supervision after catch-up resolves.
+A departed or replaced CLI owner stops normal delivery without rebinding, deleting the ownership record or replaying pending submissions.
+
+The first combined normal-mode fixture handled a real worker's blocked event through the watcher after the coordinator's final response with AFK absent, then handled idle, draft, busy and restart events.
+It failed explicit normal shutdown because the watcher's foreground 30-second signal grace delayed SIGTERM handling beyond the launcher's unchanged 10-second deadline.
+The watcher now waits for an owned background grace process and reaps it during cleanup; deterministic regression verifies prompt shutdown and later recovery of the unsurfaced status.
+The live attempt remains failed, and current-source full lifecycle proof, review and CI remain required before readiness.
+
 ### Native evidence and current limits
 
 On 2026-10-08, native CLI `0.160.1` and managed app-server `0.161.0` handled an isolated post-final queue event on an owned Unix endpoint.

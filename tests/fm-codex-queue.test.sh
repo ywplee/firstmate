@@ -2,7 +2,7 @@
 # Native queue acceptance, exact-turn receipts, type-once recovery and refusal.
 set -eu
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-python3 - "$ROOT" <<'PY'
+python3 - "$@" "$ROOT" <<'PY'
 import importlib.util
 import json
 import os
@@ -11,13 +11,14 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
-spec = importlib.util.spec_from_file_location('queue_helper', Path(sys.argv[1]) / 'bin/fm-codex-queue.py')
+root = Path(sys.argv.pop())
+spec = importlib.util.spec_from_file_location('queue_helper', root / 'bin/fm-codex-queue.py')
 helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
-root = Path(sys.argv.pop())
 sys.path.insert(0, str(root / 'tests'))
 from fm_codex_queue_live_assertions import assert_busy_order, assert_restart_recovery
 
@@ -53,6 +54,153 @@ class QueueTests(unittest.TestCase):
 
     def accepted(self):
         return patch.object(helper.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'Queued message id', ''))
+
+    def test_normal_delivery_survives_final_and_supervisor_restart_without_afk(self):
+        (self.state / '.afk').unlink()
+        helper.save(self.state / '.codex-queue-normal.json', self.data)
+        with self.accepted() as command:
+            self.assertFalse(helper.flush(self.state, self.data))
+            self.assertEqual(command.call_count, 1)
+        pending = json.loads((self.state / '.codex-queue-pending.json').read_text())
+        self.handle(pending['message'])
+        with self.accepted() as command:
+            self.assertTrue(helper.flush(self.state, self.data))
+            self.assertEqual(command.call_count, 0)
+        with (self.state / '.subsuper-escalations').open('a') as stream:
+            stream.write('later blocked event\n')
+        with self.accepted() as command:
+            self.assertFalse(helper.flush(self.state, self.data))
+            self.assertEqual(command.call_count, 1)
+        self.assertFalse((self.state / '.afk').exists())
+
+    def test_normal_delivery_stops_for_return_disable_or_changed_binding(self):
+        (self.state / '.afk').unlink()
+        normal = self.state / '.codex-queue-normal.json'
+        helper.save(normal, self.data)
+        gate = self.state / '.afk-return-catchup'
+        gate.touch()
+        with self.accepted() as command:
+            self.assertFalse(helper.flush(self.state, self.data))
+            self.assertEqual(command.call_count, 0)
+        gate.unlink()
+        for value in [dict(self.data, thread='other'), None]:
+            if value is None:
+                normal.unlink()
+            else:
+                helper.save(normal, value)
+            with self.accepted() as command:
+                self.assertFalse(helper.flush(self.state, self.data))
+                self.assertEqual(command.call_count, 0)
+
+    def test_only_owner_can_enable_normal_after_catchup(self):
+        (self.state / '.afk').unlink()
+        with patch.object(helper, 'ancestor', return_value=False):
+            with self.assertRaisesRegex(ValueError, 'owning coordinator'):
+                helper.normal_control(self.state, self.data, True)
+        gate = self.state / '.afk-return-catchup'
+        gate.touch()
+        with self.assertRaisesRegex(ValueError, 'catch-up'):
+            helper.normal_control(self.state, self.data, True)
+        gate.unlink()
+        helper.normal_control(self.state, self.data, True)
+        self.assertEqual(json.loads((self.state / '.codex-queue-normal.json').read_text()), self.data)
+        (self.state / '.afk').touch()
+        with self.assertRaisesRegex(ValueError, 'away mode'):
+            helper.normal_control(self.state, self.data, True)
+        (self.state / '.afk').unlink()
+        helper.normal_control(self.state, self.data, False)
+        self.assertFalse((self.state / '.codex-queue-normal.json').exists())
+
+    def test_normal_launcher_reuses_singleton_without_fake_afk(self):
+        (self.state / '.afk').unlink()
+        script = '''
+. "$1/bin/fm-afk-launch.sh"
+discover_supervisor_target() { printf '%s' exact-test-target; }
+discover_supervisor_backend() { printf '%s' codex-queue; }
+python3() { printf '%s\\n' "$2" >> "$FM_HOME/commands"; }
+daemon_lock_held_by_live_daemon() { return 0; }
+fm_afk_launch_record_validate_if_present() { return 0; }
+fm_afk_launch_create_tmux() { exit 9; }
+fm_afk_launch_start normal || exit 1
+test ! -e "$FM_AFK_LAUNCH_STATE/.afk" || exit 2
+fm_afk_launch_start || exit 3
+test -f "$FM_AFK_LAUNCH_STATE/.afk" || exit 4
+'''
+        target = self.state / '.codex-queue-target.json'
+        helper.save(target, self.data)
+        result = subprocess.run(['bash', '-c', script, '_', str(root)], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.state / 'commands').read_text().splitlines(), ['check', 'enable', 'check'])
+        self.assertEqual((self.state / '.supervise-daemon.lock/pid').read_text(), '42')
+
+    def test_normal_native_defer_surfaces_wedge_without_afk(self):
+        (self.state / '.afk').unlink()
+        (self.state / '.subsuper-escalations.since').write_text('1')
+        script = '''
+. "$1/bin/fm-wake-lib.sh"
+. "$1/bin/fm-supervise-daemon.sh"
+python3() { [ "$2" = active ]; }
+FM_SUPERVISOR_BACKEND=codex-queue
+FM_MAX_DEFER_SECS=1
+FM_ESCALATE_BATCH_SECS=0
+housekeeping "$2"
+'''
+        result = subprocess.run(['bash', '-c', script, '_', str(root), str(self.state)], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.state / '.subsuper-inject-wedged').exists())
+        self.assertEqual((self.state / '.subsuper-escalations').read_text(), 'decision event\n')
+        self.assertFalse((self.state / '.afk').exists())
+
+    def test_default_signal_grace_is_interruptible_for_supervisor_shutdown(self):
+        (self.state / '.afk').unlink()
+        fakebin = self.state / 'fakebin'
+        fakebin.mkdir()
+        tmux = fakebin / 'tmux'
+        tmux.write_text('#!/bin/sh\nexit 0\n')
+        tmux.chmod(0o700)
+        (self.state / 'worker.status').write_text('blocked: harmless fixture event\n')
+        env = dict(os.environ, PATH=str(fakebin) + ':' + os.environ['PATH'], FM_POLL='1', FM_CHECK_INTERVAL='999999', FM_HEARTBEAT='999999', FM_WEDGE_ALARM_EXEC='discard')
+        env.pop('FM_SIGNAL_GRACE', None)
+        child = None
+        with subprocess.Popen(['bash', str(root / 'bin/fm-watch.sh')], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as watcher:
+            try:
+                deadline = time.monotonic() + 8
+                while time.monotonic() < deadline and child is None:
+                    children = subprocess.run(['pgrep', '-P', str(watcher.pid)], capture_output=True, text=True).stdout.split()
+                    for value in children:
+                        try:
+                            args = helper.process_args(int(value))
+                        except OSError:
+                            continue
+                        if len(args) == 2 and Path(args[0]).name == 'sleep' and args[1] == '30':
+                            child = int(value)
+                            break
+                    time.sleep(0.02)
+                self.assertIsNotNone(child, 'watcher did not enter the default signal grace')
+                watcher.terminate()
+                self.assertNotEqual(watcher.wait(timeout=2), 0)
+                self.assertFalse((self.state / '.watch.lock').exists())
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(child, 0)
+                self.assertFalse((self.state / '.wake-queue').exists())
+            finally:
+                if watcher.poll() is None:
+                    watcher.terminate()
+                    if child:
+                        try:
+                            os.kill(child, 15)
+                        except ProcessLookupError:
+                            pass
+                    watcher.wait(timeout=3)
+                watcher.communicate()
+        env['FM_SIGNAL_GRACE'] = '1'
+        recovery = subprocess.run(['bash', str(root / 'bin/fm-watch.sh')], env=env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(recovery.returncode, 0, recovery.stderr)
+        self.assertTrue(recovery.stdout.startswith('signal:'))
+        records = (self.state / '.wake-queue').read_text().splitlines()
+        self.assertTrue(records)
+        for record in records:
+            self.assertIn('\tsignal\tworker.status\t', record)
 
     def test_acceptance_is_pending_and_restart_does_not_resend(self):
         with self.accepted() as command:

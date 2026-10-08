@@ -152,6 +152,10 @@ return_reconcile() {
     fi
   fi
 
+  if [ "$lifecycle_ok" -eq 1 ]; then
+    rm -f "$STATE/.codex-queue-normal.json" || lifecycle_ok=0
+  fi
+
   if [ -e "$STATE/.codex-queue-pending.json" ]; then
     local native_target
     native_target=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["thread"])' "$STATE/.codex-queue-target.json" 2>/dev/null) || native_target=
