@@ -32,13 +32,16 @@ The helper supplies root `--no-daemon` on both its capability probe and launch, 
 Its default prompt tells the successor to run normal session-start, reconcile recorded work, run `preflight`, and enter the existing AFK skill.
 A custom prompt must preserve those duties; the disposable verification prompt deliberately uses only scratch lock acquisition and acknowledgement.
 
-Launch refuses an existing agent pane, another socket or pane, an unrelated process ancestry, a live coordinator lock, a live old watcher or daemon, and an unfinished away-mode lifecycle.
+Launch refuses an existing agent pane, another socket or pane, an unrelated process ancestry, a live coordinator lock, a live daemon, and an unfinished away-mode lifecycle.
+It also refuses an identity-matched live watcher for the same home, even from another checkout or symlink path.
+Recycled supervision PIDs and a standalone stale daemon pidfile do not establish live ownership.
 It leaves old lock and queue records for normal session-start recovery.
 Preflight verifies the exact pane/socket, the live lock identity in its process ancestry, and a Codex process launched with `--no-daemon`, an explicit model and an explicit reasoning effort.
 For the authorized personal rollout, its output must identify `/Users/yewonlee/.codex-personal`, `model=gpt-6.1-sol` and `effort=high`.
 It reports process and ownership checks, never delivery readiness.
 The permission context must allow `ps` and tmux inspection; a tested macOS `workspace-write` context denied `ps`, so that context could not pass ownership verification.
-If a directory trust dialog appears, handle its known scratch or operational directory through `harness-adapters`; trust waiting is a distinct startup state.
+During scratch verification, stop immediately on any new directory, configuration or hook trust dialog or login prompt, and retain the evidence without accepting it.
+For operational trust handling, the owning Firstmate follows `harness-adapters`; trust waiting is a distinct startup state.
 
 ## Orderly transfer
 
@@ -92,7 +95,7 @@ The model's handling files and native TUI transcripts establish these results:
 These original-helper results are separate from an earlier manual terminal wake proof and from failed automated startup fixtures.
 The opt-in one-shot fixture repeatedly displayed `Killed: 9` before inference, including when resolving the same CLI installation directly.
 An external process sample observed the owned launch PID already dead at 2.542 seconds while the fixture was still alive; cleanup followed its failure, and neither the 120-second readiness deadline nor the 150-second external deadline was reached.
-Recreating its saved launcher independently reached native directory trust and then the successful current-helper checks above.
+Recreating its saved launcher independently reached native directory trust and then the successful original-helper checks above.
 The automated server creation/startup discrepancy remains unresolved, and that complete fixture is not reported as passing.
 macOS policy warnings occurred on both failed and successful launches and do not establish the kill source.
 Private task evidence retains source hashes, launch arguments, process ancestry, lock records, queue records, handling files and both successful and failed transcripts.
