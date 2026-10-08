@@ -18,6 +18,8 @@ batched digest rather than per-wake injections.
 
 ## What it does
 
+For a Codex terminal primary, run `bin/fm-codex-supervisor.sh preflight` before entering this lifecycle; [`docs/codex-supervision-handoff.md`](../../../docs/codex-supervision-handoff.md) owns the terminal transfer and delivery-proof procedure, including Desktop's current wake limitation.
+
 1. **Enter the lifecycle through `bin/fm-afk-launch.sh`.**
    This owns the durable state write, session-scoped stale-artifact clearing,
    terminal record, and rollback.

@@ -443,7 +443,7 @@ fm_afk_launch_start() {
   fi
   # Capture the captain pane FIRST, before creating anything.
   captain_target=$(discover_supervisor_target) || {
-    fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"; return 1; }
+    fm_afk_launch_log "no addressable coordinator pane; Desktop foreground checkpoints cannot provide post-turn unattended supervision (see docs/codex-supervision-handoff.md)"; return 1; }
   captain_backend=$(discover_supervisor_backend) || {
     fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"; return 1; }
 

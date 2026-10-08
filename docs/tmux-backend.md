@@ -11,6 +11,8 @@ Pick tmux unless you have a specific reason to try an experimental backend (herd
 
 ## Prerequisites
 
+For current Codex primary post-final delivery evidence and the guarded terminal handoff, see [Codex terminal supervision handoff](codex-supervision-handoff.md).
+
 - tmux itself: `brew install tmux` (or your platform's package manager).
 - The universal firstmate prerequisites: a verified crew harness plus the required toolchain, detected at session start and installed only after you approve; [`docs/configuration.md`](configuration.md) owns both lists ("Harness support", "Toolchain").
 
