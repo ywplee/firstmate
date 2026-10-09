@@ -515,7 +515,7 @@ if "$2"; then exit 1; fi
             endpoint.chmod(0o666)
             with self.assertRaisesRegex(ValueError, 'private'):
                 helper.socket_identity(endpoint)
-        endpoint.unlink()
+        endpoint.rename(self.state / 'original-control.sock')
         with socket.socket(socket.AF_UNIX) as sock:
             sock.bind(str(endpoint))
             endpoint.chmod(0o600)
