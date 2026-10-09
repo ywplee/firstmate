@@ -2,6 +2,7 @@
 
 Status: blocked for Firstmate as a selectable shell backend.
 The Codex Desktop host-tool loop works, including status-file writes, but Firstmate does not yet have a supported shell-callable bridge to those host tools.
+For CLI primary supervision alternatives, see [Codex supervision support](codex-supervision-handoff.md); terminal worker endpoints do not provide a Desktop coordinator wake route.
 
 This document replaces the earlier passive visible-thread ledger shape.
 A manual ledger is not a backend.

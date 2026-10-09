@@ -29,6 +29,12 @@
 #   fm-afk-launch.sh start-native
 #                              Prepare lifecycle state for a harness-native
 #                              background job and record that no terminal exists.
+#   fm-afk-launch.sh start-normal
+#                              Owner-only native queue enable and singleton launch
+#                              without entering away mode; reuses a live singleton.
+#   fm-afk-launch.sh stop-normal
+#                              Owner-only normal disable and singleton shutdown;
+#                              refuses while away mode or return catch-up is active.
 #   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
 #                              cleanup flushes WHILE state/.afk is still present,
 #                              wait for it, close the recorded terminal by exact
@@ -36,7 +42,10 @@
 #   fm-afk-launch.sh reconcile Close a recorded-but-dead daemon terminal by exact
 #                              id and drop the record (recovery after a crash).
 #
-# Supported backends: herdr, tmux. Others (zellij, orca, cmux) have no verified
+# Supervisor transports: herdr, tmux, codex-queue (fm-codex-queue.py owns binding).
+# Native queue uses detached tmux only to host the existing supervisor daemon;
+# it leaves the coordinator and its managed app-server in their current host.
+# Other backends (zellij, orca, cmux) have no verified
 # non-visible-launch primitive here yet and refuse loudly.
 #
 # Test seam: FM_AFK_LAUNCH_ENTRY overrides the command run in the created
@@ -334,18 +343,18 @@ fm_afk_launch_reconcile() {
 
 fm_afk_launch_restore_backup() {  # <backup> <had-afk>
   local backup=$1 had_afk=$2 artifact result=0
-  rm -f "$FM_AFK_LAUNCH_STATE/.afk" \
-    "$FM_AFK_LAUNCH_STATE/.subsuper-escalations" \
-    "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" \
-    "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" || result=1
+  rm -f "$FM_AFK_LAUNCH_STATE/.afk" || result=1
   if [ "$had_afk" -eq 1 ]; then
     cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk" || result=1
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
-    if [ -e "$backup/$artifact" ]; then
-      cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact" || result=1
-    fi
-  done
+  if ! fm_afk_has_native_delivery "$FM_AFK_LAUNCH_STATE"; then
+    for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+      rm -f "$FM_AFK_LAUNCH_STATE/$artifact" || result=1
+      if [ -e "$backup/$artifact" ]; then
+        cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact" || result=1
+      fi
+    done
+  fi
   if [ "$result" -eq 0 ]; then
     rm -rf "$backup" || return 1
   else
@@ -420,6 +429,7 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
   entry=$(fm_afk_launch_entry_cmd)
   cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
     "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
+  if [ "${3:-}" = normal ]; then cmd="$cmd --normal"; fi
   if ! fm_afk_launch_record_write tmux "$session" ""; then
     fm_afk_launch_log "failed to persist planned tmux daemon session '$session'"
     return 1
@@ -443,9 +453,29 @@ fm_afk_launch_start() {
   fi
   # Capture the captain pane FIRST, before creating anything.
   captain_target=$(discover_supervisor_target) || {
-    fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"; return 1; }
+    fm_afk_launch_log "no verified coordinator target; use native queue binding or a supported pane (see docs/codex-supervision-handoff.md)"; return 1; }
   captain_backend=$(discover_supervisor_backend) || {
     fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"; return 1; }
+
+  if [ "$captain_backend" = codex-queue ]; then
+    if [ -f "$FM_AFK_LAUNCH_STATE/.codex-queue-target.json" ]; then
+      FM_SUPERVISOR_TARGET="$captain_target" python3 "$FM_AFK_LAUNCH_DIR/fm-codex-queue.py" check || return 1
+    else
+      FM_SUPERVISOR_TARGET="$captain_target" python3 "$FM_AFK_LAUNCH_DIR/fm-codex-queue.py" bind || return 1
+    fi
+  fi
+
+  if [ "${1:-}" = normal ]; then
+    [ "$captain_backend" = codex-queue ] || return 1
+    FM_SUPERVISOR_TARGET="$captain_target" python3 "$FM_AFK_LAUNCH_DIR/fm-codex-queue.py" enable || return 1
+    if daemon_lock_held_by_live_daemon; then
+      fm_afk_launch_record_validate_if_present
+      return
+    fi
+    fm_afk_launch_reconcile || return 1
+    fm_afk_launch_create_tmux "$captain_target" "$captain_backend" normal
+    return
+  fi
 
   mkdir -p "$FM_AFK_LAUNCH_STATE"
 
@@ -464,11 +494,13 @@ fm_afk_launch_start() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
-    if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
-      cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
-    fi
-  done
+  if ! fm_afk_has_native_delivery "$FM_AFK_LAUNCH_STATE"; then
+    for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+      if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
+        cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
+      fi
+    done
+  fi
   if ! fm_afk_launch_reconcile; then
     result=1
   else
@@ -489,7 +521,7 @@ fm_afk_launch_start() {
   if [ "$result" -eq 0 ]; then
     case "$captain_backend" in
       herdr) fm_afk_launch_create_herdr "$captain_target" "$captain_backend"; result=$? ;;
-      tmux)  fm_afk_launch_create_tmux "$captain_target" "$captain_backend"; result=$? ;;
+      tmux|codex-queue)  fm_afk_launch_create_tmux "$captain_target" "$captain_backend"; result=$? ;;
       *)
         fm_afk_launch_log "no non-visible daemon-launch primitive for backend '$captain_backend' yet (supported: herdr, tmux)"
         result=1
@@ -522,11 +554,13 @@ fm_afk_launch_start_native() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
-    if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
-      cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
-    fi
-  done
+  if ! fm_afk_has_native_delivery "$FM_AFK_LAUNCH_STATE"; then
+    for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+      if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
+        cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
+      fi
+    done
+  fi
   fm_afk_launch_reconcile || result=1
   if [ "$result" -eq 0 ]; then
     if ! fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
@@ -548,7 +582,7 @@ fm_afk_launch_start_native() {
 }
 
 fm_afk_launch_stop() {
-  local pid pid_identity current_identity result=0 read_result
+  local pid owner pid_identity current_identity result=0 read_result
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
@@ -558,14 +592,18 @@ fm_afk_launch_stop() {
   # (1) SIGTERM the daemon so its cleanup trap flushes buffered escalations
   # WHILE state/.afk is still present (the exit-ordering fix: clearing .afk
   # first would make that flush a no-op via inject_msg's presence gate).
-  pid=""
+  pid=$(daemon_lock_pid 2>/dev/null || true)
   pid_identity=""
-  if daemon_lock_held_by_live_daemon; then
-    pid=$(daemon_lock_pid 2>/dev/null) || return 1
-    pid_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  owner=$(daemon_lock_owner 2>/dev/null || true)
+  if [ -n "$owner" ] && fm_pid_alive "$pid" && daemon_pid_matches "$pid" "$owner"; then
+    pid_identity=$(fm_pid_identity "$pid" 2>/dev/null) || {
+      fm_pid_alive "$pid" && return 1
+      pid=""
+    }
   fi
+  [ -n "$pid_identity" ] || pid=""
   if [ -n "$pid" ]; then
-    if ! kill -TERM "$pid" 2>/dev/null; then
+    if ! kill -TERM "$pid" 2>/dev/null && fm_pid_alive "$pid"; then
       fm_afk_launch_log "failed to signal away-mode daemon pid=$pid"
       result=1
     fi
@@ -609,6 +647,10 @@ fm_afk_launch_main() {
   trap 'exit 143' TERM
   case "${1:-start}" in
     start) fm_afk_launch_start ;;
+    start-normal) fm_afk_launch_start normal ;;
+    stop-normal)
+      [ ! -e "$FM_AFK_LAUNCH_STATE/.afk" ] && python3 "$FM_AFK_LAUNCH_DIR/fm-codex-queue.py" disable && fm_afk_launch_stop
+      ;;
     start-native) fm_afk_launch_start_native ;;
     stop) fm_afk_launch_stop ;;
     reconcile) fm_afk_launch_reconcile ;;

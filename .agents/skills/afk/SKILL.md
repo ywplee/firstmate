@@ -18,6 +18,11 @@ batched digest rather than per-wake injections.
 
 ## What it does
 
+For daemon-backed Codex CLI supervision, follow the native queue binding procedure in [`docs/codex-supervision-handoff.md`](../../../docs/codex-supervision-handoff.md).
+If this skill was loaded for a native normal-mode escalation with `state/.afk` absent, follow that guide's normal ownership procedure without entering away mode.
+For the alternative tmux `--no-daemon` route, run `bin/fm-codex-supervisor.sh preflight` before entering this lifecycle.
+Existing Herdr Codex primaries use the pane lifecycle below without that tmux-only preflight.
+
 1. **Enter the lifecycle through `bin/fm-afk-launch.sh`.**
    This owns the durable state write, session-scoped stale-artifact clearing,
    terminal record, and rollback.
@@ -46,8 +51,7 @@ batched digest rather than per-wake injections.
    Both paths share `bin/fm-afk-start.sh` as the daemon entry.
    The native path tells it that the launcher already prepared lifecycle state; the terminal-backed path lets the entry perform its existing state setup inside the new terminal.
    It exits immediately if the identity-backed daemon lock already names a live process, otherwise it execs `bin/fm-supervise-daemon.sh` in the foreground.
-   The daemon is **presence-gated**: it injects escalations only while
-   `state/.afk` exists, and stays quiet otherwise.
+   Pane injection is presence-gated by `state/.afk`; native eligibility is owned by the [supervision guide](../../../docs/codex-supervision-handoff.md).
 
 3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
    its child; the singleton lock no-ops a stray arm harmlessly.
@@ -56,7 +60,8 @@ batched digest rather than per-wake injections.
 
 ## How to exit afk
 
-No `/back` is needed. The first genuine message is the return signal:
+While away mode is active, no `/back` is needed.
+The first genuine message is the return signal:
 
 - A message **without** the sentinel marker and **not** starting with `/afk` -> the captain is back.
   Run `bin/fm-afk-return.sh` before acting on the message that brought the captain back.
@@ -83,6 +88,10 @@ explicit word - the daemon just batches the notification.
 The daemon prefixes every injection with `FM_INJECT_MARK` (U+2063 INVISIBLE SEPARATOR), which has no normal keyboard keystroke and survives terminal transport as UTF-8 text.
 This is how firstmate tells a daemon escalation apart from a real message in the same pane.
 The marker travels with the message text; it does not rely on harness-level typed-vs-injected detection, which is not portable across claude, codex, opencode, pi, and grok.
+
+## Native queue transport
+
+The [supervision guide](../../../docs/codex-supervision-handoff.md) owns native normal and AFK delivery, pending recovery, return reconciliation, empirical versions and validation limits.
 
 ## Busy-guard and composer guard
 
@@ -147,7 +156,7 @@ The daemon wraps `fm-watch.sh`, runs the watcher as a child, classifies each
 wake reason in bash, and self-handles the routine majority without consuming a
 firstmate turn.
 Captain-relevant events, plus a bounded recheck of a declared external wait that remains idle, escalate to firstmate's context as one pre-read, single-line, batched digest.
-The classification predicates (the captain-relevant verb set, declared-pause vocabulary, signal/stale tests, and fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses for its own triage when afk is off, so the two modes apply one identical policy.
+The classification predicates (the captain-relevant verb set, declared-pause vocabulary, signal/stale tests, and fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses when daemon ownership is absent, so the two paths apply one identical policy.
 While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
 
 Classify each wake this way:
@@ -209,27 +218,12 @@ the marker lets firstmate distinguish it from a real captain message.
   (`fm-wake-lib.sh`) instead of `flock`, which is absent on macOS.
 - **Dedupe across signal/stale/scan** - `classify_signal` and terminal `classify_stale` paths check the seen-status marker before escalating, so a captain-relevant status escalated by one path is not re-escalated by another in the same digest.
   The marker does not clear or suppress possible-wedge aging for a nonterminal progress line.
-- **Auto-discovered supervisor pane** - the daemon resolves its own BACKEND
-  (tmux vs herdr) and TARGET independently, mirroring
-  `bin/fm-backend.sh`'s own runtime auto-detection. Backend: `FM_SUPERVISOR_BACKEND`
-  override, then `$TMUX_PANE` set (tmux), then `$HERDR_ENV=1` with
-  `$HERDR_PANE_ID` present (herdr), then a tmux fallback. Target:
-  `FM_SUPERVISOR_TARGET` override (a tmux target or a herdr
-  `"<session>:<pane-id>"` target), then `$TMUX_PANE`, then
-  `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then a
-  `firstmate:0` fallback with a warning. Both resolution sources are logged at
-  startup so a wrong-but-resolving fallback is detectable. Other runtime
-  backends, including zellij, orca, and cmux, are not yet supported as
-  supervisor backends; the daemon refuses loudly at startup instead of
-  misapplying tmux primitives to a pane that isn't one
-  (docs/herdr-backend.md "Away-mode daemon: herdr supervisor-pane support").
+- **Supervisor discovery** - follow the [supervisor transport configuration](../../../docs/configuration.md#supervisor-transport-fm_supervisor_backend--fm_supervisor_target) and its authoritative discovery-script pointer.
 
 ## Stale-artifact lifecycle
 
-Treat `state/.subsuper-escalations`, its `.since` sidecar, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
-Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
-Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush and clears it last.
-`docs/herdr-backend.md` "Stale-artifact lifecycle fix" owns the mechanism and verification evidence.
+Always use the launcher and return owner described above rather than clearing delivery artifacts by hand.
+The [Herdr reference](../../../docs/herdr-backend.md#stale-artifact-lifecycle-fix-same-change) owns pane-artifact lifecycle evidence; the [native supervision guide](../../../docs/codex-supervision-handoff.md) owns native retention and reconciliation.
 
 ## Reliability properties
 

@@ -9,7 +9,7 @@
 # working signal is never silently swallowed. A declared external-wait pause is
 # the separate idle absorb case and re-surfaces only on its long bounded cadence,
 # although its initial no-verb status signal still surfaces in normal mode.
-# While state/.afk exists, the daemon owns triage and this watcher queues and exits
+# With AFK or enabled native normal ownership, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          has a captain-relevant verb OR a no-verb signal's crew
@@ -178,11 +178,16 @@ _event_cap_key=""
 _event_cap_ok=0
 _event_cap_fails=0
 
-# afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this
-# watcher and owns triage, so the watcher must behave one-shot (enqueue + exit on
-# every wake) and let the daemon classify - never absorb here, or the daemon's
+# When AFK or checked native normal ownership gives the daemon triage, this
+# watcher must behave one-shot (enqueue + exit on every wake) and let the daemon
+# classify - never absorb here, or the daemon's
 # digest/injection layer would never see the wake.
-afk_present() { [ -e "$STATE/.afk" ]; }
+afk_present() {
+  [ -e "$STATE/.afk" ] && return 0
+  [ "${FM_SUPERVISOR_BACKEND:-}" = codex-queue ] || return 1
+  [ -f "$STATE/.codex-queue-normal.json" ] || return 1
+  python3 "$SCRIPT_DIR/fm-codex-queue.py" active >/dev/null 2>&1
+}
 
 # Append one line to the triage debug log explaining an absorbed (benign) wake,
 # size-capped so a long benign stretch cannot grow it without bound. Best-effort:
@@ -793,7 +798,12 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   fi
   exit 0
 fi
+SIGNAL_GRACE_PID=
 watcher_cleanup() {
+  if [ -n "$SIGNAL_GRACE_PID" ]; then
+    kill -TERM "$SIGNAL_GRACE_PID" 2>/dev/null || true
+    wait "$SIGNAL_GRACE_PID" 2>/dev/null || true
+  fi
   fm_active_check_stop || return 1
   fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup
@@ -908,7 +918,10 @@ while :; do
   # signature for an already-pending file (last write wins below).
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
-    sleep "$SIGNAL_GRACE"
+    sleep "$SIGNAL_GRACE" &
+    SIGNAL_GRACE_PID=$!
+    wait "$SIGNAL_GRACE_PID" || true
+    SIGNAL_GRACE_PID=
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do

@@ -1,6 +1,6 @@
 Mode: Codex foreground checkpoint.
 
-When this session owns supervision and away mode is not active:
+When this session owns supervision, away mode is not active and native normal ownership is not enabled:
 1. Drain first with `bin/fm-wake-drain.sh`.
 2. Source `__FM_X_MODE_ENV__` first when X mode is active.
 3. First cycle: run one foreground watcher checkpoint with `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`.
@@ -13,3 +13,7 @@ When this session owns supervision and away mode is not active:
 
 Codex cannot reason while a foreground tool call is running.
 The bounded checkpoint returns control regularly so user messages and queued wakes can be handled without relying on background-task wake semantics.
+After a final response, Desktop needs a verified host wake route to restart this loop; a persistent watcher alone cannot wake an unaddressable coordinator.
+For native daemon queue normal or AFK ownership and the alternative orderly terminal transfer, use `docs/codex-supervision-handoff.md`.
+An enabled native singleton owns its watcher across final responses; do not arm a foreground watcher concurrently.
+Unbound Codex sessions retain the foreground checkpoint protocol above.

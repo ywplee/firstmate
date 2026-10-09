@@ -12,10 +12,11 @@
 # batch window.
 #
 # PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine: it
-# injects ONLY when the durable away-mode flag state/.afk is present. Invoking
+# Pane injection requires the durable away-mode flag state/.afk. Invoking
 # the /afk skill sets that flag and starts this daemon; any real (unmarked)
 # user message clears it and firstmate resumes full responsiveness.
-# When afk is off, normal fm-watch.sh always-on triage is the active mechanism.
+# Native queue normal ownership is enabled through fm-afk-launch.sh start-normal.
+# Otherwise, when afk is off, fm-watch.sh always-on triage is the active mechanism.
 # Any buffered daemon escalations that remain while afk is off survive in
 # state/.subsuper-escalations and are flushed on the next "while you were out"
 # catch-up or when afk is re-entered.
@@ -69,7 +70,7 @@
 #                                   tmux target or a herdr "<session>:<pane-id>"
 #                                   target; which one it's read as is decided by
 #                                   FM_SUPERVISOR_BACKEND (below), independently.
-#          FM_SUPERVISOR_BACKEND    supervisor pane BACKEND (tmux|herdr;
+#          FM_SUPERVISOR_BACKEND    supervisor transport (tmux|herdr|codex-queue;
 #                                   override; otherwise auto-discovered the same
 #                                   way bin/fm-backend.sh's fm_backend_detect
 #                                   resolves the runtime firstmate itself is
@@ -79,6 +80,8 @@
 #                                   supported as supervisor backends; the daemon
 #                                   refuses loudly at startup rather than trying
 #                                   tmux primitives against a non-tmux pane.
+#                                   codex-queue uses the exact binding and durable
+#                                   handling receipts owned by fm-codex-queue.py.
 #          FM_INJECT_SKIP           |-prefixes force-self-handle bypassing
 #                                   classification (default "heartbeat"); empty
 #                                   disables. Use sparingly: it overrides the
@@ -176,7 +179,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # harness-verification discipline. Selecting one refuses loudly at startup
 # instead of silently running tmux primitives against a pane that is not a tmux
 # pane.
-FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr"
+FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr codex-queue"
 INJECT_SKIP_DEFAULT="heartbeat"
 STALE_ESCALATE_SECS_DEFAULT=240
 ESCALATE_BATCH_SECS_DEFAULT=90
@@ -244,6 +247,14 @@ _hash_text() {
 # afk_active: 0 if the durable away-mode flag exists, 1 otherwise.
 afk_active() {  # <state>
   [ -e "$1/$AFK_FLAG_NAME" ]
+}
+
+supervision_active() {
+  local state=$1
+  [ ! -e "$state/.afk-return-catchup" ] || return 1
+  afk_active "$state" && return 0
+  [ "${FM_SUPERVISOR_BACKEND:-}" = codex-queue ] || return 1
+  python3 "$FM_DAEMON_DIR/fm-codex-queue.py" active >/dev/null 2>&1
 }
 
 # afk_enter / afk_exit: write/clear the away-mode flag. Called by the /afk
@@ -609,12 +620,17 @@ stale_window_is_busy() {  # <window> <state>
     | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
 }
 
-escalate_add() {  # <state> <distilled-item>
-  local state=$1 item=$2 buf
+escalate_add() (  # <state> <distilled-item>
+  local state=$1 item=$2 buf lock
   buf="$state/.subsuper-escalations"
+  if [ "${FM_SUPERVISOR_BACKEND:-}" = codex-queue ]; then
+    lock="$state/.subsuper-escalations.lock"
+    fm_lock_acquire_wait "$lock" || return 1
+    trap 'fm_lock_release "$lock"' EXIT
+  fi
   [ -s "$buf" ] || _now > "${buf}.since"
   printf '%s\n' "$item" >> "$buf"
-}
+)
 
 # Flush the escalation buffer as ONE batched, single-line digest to the
 # supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
@@ -622,6 +638,10 @@ escalate_add() {  # <state> <distilled-item>
 escalate_flush() {  # <state>
   local state=$1 buf item n msg
   buf="$state/.subsuper-escalations"
+  if [ "${FM_SUPERVISOR_BACKEND:-}" = codex-queue ]; then
+    python3 "$FM_DAEMON_DIR/fm-codex-queue.py" flush
+    return
+  fi
   [ -s "$buf" ] || return 0
   n=$(wc -l < "$buf" 2>/dev/null || echo 0)
   # Join buffered items with the literal " | " separator into one digest line.
@@ -954,13 +974,14 @@ housekeeping() {  # <state>
   # retry the normal delivery path. If that still cannot confirm, raise a loud
   # wedge alarm while preserving the buffer.
   max_defer=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
-  if afk_active "$state" && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
+  if [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
     oldest=$(_oldest_line_age "$state/.subsuper-escalations")
     # Throttle the alarm to once per max-defer window (the wedge marker doubles
     # as the throttle). A successful flush clears the buffer; a failed one alarms
     # and waits.
     if [ "$oldest" -ge "$max_defer" ] \
-       && [ "$(_file_age "$state/.subsuper-inject-wedged")" -ge "$max_defer" ]; then
+       && [ "$(_file_age "$state/.subsuper-inject-wedged")" -ge "$max_defer" ] \
+       && supervision_active "$state"; then
       if escalate_flush "$state"; then
         log "inject recovered: max-defer flush succeeded after ${oldest}s undelivered"
         rm -f "$state/.subsuper-inject-wedged"
@@ -1373,7 +1394,7 @@ fm_super_main() {
   # probe, so a herdr supervisor pane is checked via the herdr adapter; for
   # backend=tmux this runs the exact same `tmux display-message -p -t "$TARGET"
   # '#{pane_id}'` call as before.
-  if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
+  if ! fm_supervisor_target_exists "$BACKEND" "$TARGET"; then
     echo "error: supervisor target '$TARGET' does not resolve to a $BACKEND pane; set FM_SUPERVISOR_TARGET" >&2
     log "startup failed: target '$TARGET' not found (backend=$BACKEND)"
     fm_lock_release "$LOCK" 2>/dev/null || true
@@ -1389,9 +1410,11 @@ fm_super_main() {
   # --- shutdown: flush buffered escalations, reap child, release lock -------
   local WATCHER_PID="" CUR_TMP=""
   cleanup() {
-    trap - TERM INT
+    trap '' TERM INT
     wedge_alarm_stop_active_notifier
-    escalate_flush "$STATE" 2>/dev/null || true
+    if [ "$BACKEND" != codex-queue ] || afk_active "$STATE" || [ -e "$STATE/.codex-queue-normal.json" ]; then
+      escalate_flush "$STATE" 2>/dev/null || true
+    fi
     if [ -n "${WATCHER_PID:-}" ]; then
       kill "$WATCHER_PID" 2>/dev/null || true
       wait "$WATCHER_PID" 2>/dev/null || true
@@ -1434,6 +1457,9 @@ fm_super_main() {
 
   local rc reason
   while true; do
+    if [ "$BACKEND" = codex-queue ] && ! afk_active "$STATE" && [ ! -e "$STATE/.codex-queue-normal.json" ]; then
+      cleanup
+    fi
     # --- pane-gone guard (preserved) ---------------------------------------
     # With the #29 watcher's enqueue-before-suppress, a wake is no longer
     # swallowed by running the watcher with no injection target. We still back
@@ -1441,9 +1467,14 @@ fm_super_main() {
     # has nowhere to go, and firstmate itself is the consumer of escalations.
     # Catch-up signals persist in state/*.status and flow on the next run, so
     # this delays rather than loses work.
-    if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
+    if ! fm_supervisor_target_exists "$BACKEND" "$TARGET"; then
+      if [ "$BACKEND" = codex-queue ] && [ -e "$STATE/.codex-queue-normal.json" ] && ! afk_active "$STATE"; then
+        log "normal supervisor owner departed; preserving delivery state and stopping"
+        cleanup
+      fi
       log "warn: supervisor target '$TARGET' gone; backing off ${INJECT_FAIL_SLEEP}s, will retry"
       # Flush is pointless with no pane; preserve any buffered escalations.
+      if [ "$BACKEND" = codex-queue ]; then housekeeping "$STATE"; fi
       sleep "$INJECT_FAIL_SLEEP"
       continue
     fi
