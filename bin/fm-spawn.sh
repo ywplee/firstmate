@@ -438,9 +438,9 @@ launch_template() {
     claude) printf '%s' 'env __CLAUDEENVPREFIX__CLAUDE_CONFIG_DIR=__CLAUDECONFIGDIR__ CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
+        printf '%s' '__CODEXENVPREFIX__codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
+        printf '%s' '__CODEXENVPREFIX__codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(cat __BRIEF__)"' ;;
@@ -787,6 +787,50 @@ real_path_or_raw() {  # <path>
     printf '%s\n' "$path"
   fi
 }
+
+expand_home_path() {  # <raw-path>
+  local p=$1
+  # shellcheck disable=SC2016,SC2088  # case patterns match the literal leading ~ / $HOME before expansion
+  case "$p" in
+    '~') printf '%s\n' "$HOME" ;;
+    '~/'*) printf '%s\n' "$HOME/${p#\~/}" ;;
+    '$HOME') printf '%s\n' "$HOME" ;;
+    '$HOME/'*) printf '%s\n' "$HOME/${p#\$HOME/}" ;;
+    *) printf '%s\n' "$p" ;;
+  esac
+}
+
+codex_env_prefix=''
+if [ "$HARNESS" = codex ]; then
+  codex_home_selected=''
+  codex_prefix_len=-1
+  codex_home_cfg="$CONFIG/codex-home"
+  if [ -f "$codex_home_cfg" ]; then
+    while IFS= read -r codex_rule || [ -n "$codex_rule" ]; do
+      codex_rule=${codex_rule#"${codex_rule%%[![:space:]]*}"}
+      case "$codex_rule" in ''|'#'*) continue ;; esac
+      read -r codex_rule_prefix codex_rule_home _codex_rest <<< "$codex_rule"
+      [ -n "$codex_rule_prefix" ] && [ -n "$codex_rule_home" ] || continue
+      codex_rule_prefix=$(expand_home_path "$codex_rule_prefix")
+      codex_rule_home=$(expand_home_path "$codex_rule_home")
+      codex_rule_prefix_real=$(real_path_or_raw "$codex_rule_prefix")
+      if [ "$PROJ_ABS_REAL" = "$codex_rule_prefix_real" ] || \
+         [ "${PROJ_ABS_REAL#"$codex_rule_prefix_real"/}" != "$PROJ_ABS_REAL" ]; then
+        if [ "${#codex_rule_prefix_real}" -gt "$codex_prefix_len" ]; then
+          codex_prefix_len=${#codex_rule_prefix_real}
+          codex_home_selected=$codex_rule_home
+        fi
+      fi
+    done < "$codex_home_cfg"
+  fi
+  if [ -n "$codex_home_selected" ]; then
+    if [ ! -d "$codex_home_selected" ] || [ ! -f "$codex_home_selected/auth.json" ]; then
+      echo "error: config/codex-home selects CODEX_HOME=$codex_home_selected for project $PROJ_ABS_REAL, but that directory is missing or has no auth.json; refusing to launch a codex worker rather than silently using the default account" >&2
+      exit 1
+    fi
+    codex_env_prefix="CODEX_HOME=$(shell_quote "$codex_home_selected") "
+  fi
+fi
 
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
@@ -1322,6 +1366,7 @@ LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__CLAUDEENVPREFIX__/$claude_env_prefix}
 LAUNCH=${LAUNCH//__CLAUDECONFIGDIR__/$sq_claude_config_dir}
+LAUNCH=${LAUNCH//__CODEXENVPREFIX__/$codex_env_prefix}
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"

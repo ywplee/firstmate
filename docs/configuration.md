@@ -188,6 +188,17 @@ Those inherited values are defaults and rules only; `fm-spawn` still permits a c
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 
+## Codex account scoping (config/codex-home)
+
+`config/codex-home` is an optional local, gitignored file that selects which codex login (`CODEX_HOME`, hence which billing account) a codex crewmate, scout, or secondmate uses, scoped by the source project's directory rather than the disposable worktree it runs in.
+Each non-blank, non-`#` line is a rule `<path-prefix> <codex-home-dir>`, two whitespace-separated fields; a leading `~`, `~/`, `$HOME`, or `$HOME/` in either field is expanded to the operator's home, and the fields are never otherwise evaluated, so a metacharacter in a path is carried literally.
+For each spawn, `fm-spawn.sh` resolves the realpath of the source project it was given (the project argument, or the firstmate root for a firstmate-repo task, with symlinks resolved), compares it against each rule's realpath'd prefix on a trailing-slash boundary so `~/src/personal` does not match `~/src/personal-other`, and the longest matching prefix wins; that rule's directory becomes `CODEX_HOME` in the codex launch env prefix.
+A source project or secondmate home outside every rule prefix uses codex's default account with no assignment; refusal applies only when a rule actually matches.
+The worktree path is deliberately not used: treehouse worktrees live under `~/.treehouse`, which a `~/src/...` rule would never match ([`docs/spawn-account-scoping.md`](spawn-account-scoping.md) explains why).
+No file or no matching rule emits no assignment, so codex behaves exactly as before; a matched rule whose directory is missing or has no `auth.json` refuses the launch rather than falling back to the default account.
+The spawner's own `CODEX_HOME` environment variable is never read.
+`config/codex-home` is inherited by secondmate homes through `FM_INHERITABLE_CONFIG`, so a secondmate's own codex crewmates apply the same directory-scoped selection.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
