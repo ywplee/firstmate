@@ -2313,7 +2313,10 @@ test_bootstrap_isolates_incomplete_poll_migration() {
     'window=fm-secondmate-a' \
     'kind=secondmate' \
     'harness=codex' \
-    'backend=tmux'
+    'backend=tmux' \
+    "home=$dir/secondmate-home"
+  mkdir -p "$dir/secondmate-home/data"
+  printf -- '- [ ] routed work\n' > "$dir/secondmate-home/data/backlog.md"
   printf 'FMX_PAIRING_TOKEN=test-token\n' > "$dir/home/.env"
   mkdir -p "$dir/home/projects"
   fm_fake_exit0 "$fakebin" curl jq
