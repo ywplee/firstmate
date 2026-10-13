@@ -550,6 +550,155 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+# Captain decision prose is free-form multi-line text that can include curly
+# quotes, an em dash, backticks, and dollar signs. The resolution body is
+# published through a private file (not a raw --body argument) and must still
+# preserve that text byte-for-byte.
+test_resolve_preserves_multiline_special_character_decision_body() {
+  local home origin hold decision_path show
+  home=$(make_home multiline-body)
+  origin=sample-prose-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Investigate sample prose decisions" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create prose-review origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Sample prose review\n\nOne captain choice remains.\n' > "$home/data/$origin/report.md"
+
+  hold=$(run_decisions "$home" hold "$origin" prose \
+    --title "Choose the sample prose" --reason "captain prose choice pending" --repo sample) \
+    || fail "could not register prose hold"
+  tasks_in "$home" add sample-prose-implementation "Apply the selected sample prose" \
+    --kind ship --repo sample >/dev/null \
+    || fail "could not create prose dependent fixture"
+  tasks_in "$home" block sample-prose-implementation --by "$hold" >/dev/null \
+    || fail "could not route dependent work behind the prose hold"
+
+  decision_path="$home/prose-decision.txt"
+  cat > "$decision_path" <<'EOF'
+Use option north for the sample system — captain's call.
+
+Context: the review raised three candidates.
+Special characters to preserve: $HOME `backtick` and a trailing dollar $
+EOF
+
+  run_decisions "$home" resolve "$origin" prose --decision-file "$decision_path" \
+    --routed-to sample-prose-implementation >/dev/null \
+    || fail "could not resolve the multi-line special-character prose decision"
+
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "Use option north for the sample system — captain's call." \
+    "resolved body lost the em dash or apostrophe"
+  # shellcheck disable=SC2016 # single quotes are deliberate: $HOME and the backtick must stay literal
+  assert_contains "$show" 'Special characters to preserve: $HOME `backtick` and a trailing dollar $' \
+    "resolved body mangled shell metacharacters"
+  pass "resolve preserves a multi-line, quoted, special-character decision body byte-for-byte"
+}
+
+# A failed tasks-axi update (the originally reported failure mode) must leave
+# the hold open rather than partially closing it, and must not leak the
+# private body file used to carry the resolution text.
+test_resolve_cleans_up_private_body_file_and_preserves_failure_ordering() {
+  local home origin hold show
+  home=$(make_home resolve-body-cleanup)
+  origin=sample-cleanup-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Investigate sample cleanup decisions" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create cleanup-review origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Sample cleanup review\n\nOne captain choice remains.\n' > "$home/data/$origin/report.md"
+
+  hold=$(run_decisions "$home" hold "$origin" cleanup \
+    --title "Choose the sample cleanup route" --reason "captain cleanup choice pending" --repo sample) \
+    || fail "could not register cleanup hold"
+  tasks_in "$home" add sample-cleanup-implementation "Apply the selected sample cleanup route" \
+    --kind ship --repo sample >/dev/null \
+    || fail "could not create cleanup dependent fixture"
+  tasks_in "$home" block sample-cleanup-implementation --by "$hold" >/dev/null \
+    || fail "could not route dependent work behind the cleanup hold"
+
+  cat > "$home/fakebin/tasks-axi" <<FAKEEOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = update ] && [ "\${2:-}" = "$hold" ] && [ ! -f "$home/update-failed-once" ]; then
+  : > "$home/update-failed-once"
+  exit 1
+fi
+exec "\$REAL_TASKS_AXI" "\$@"
+FAKEEOF
+  chmod +x "$home/fakebin/tasks-axi"
+
+  printf 'Use the short sample cleanup decision.\n' > "$home/cleanup-decision.txt"
+  if run_decisions "$home" resolve "$origin" cleanup --decision-file "$home/cleanup-decision.txt" \
+    --routed-to sample-cleanup-implementation > "$home/cleanup-fail.out" 2> "$home/cleanup-fail.err"; then
+    fail "resolve succeeded despite a failed tasks-axi update"
+  fi
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: queued" "failed update closed the hold"
+  assert_contains "$show" "held: yes" "failed update released the hold"
+  assert_not_contains "$show" "Resolution recorded by fm-decision-hold" \
+    "failed update recorded a resolution anyway"
+  if ls "$home/state"/.fm-decision-resolve-body.* >/dev/null 2>&1; then
+    fail "failed resolve leaked its private body file"
+  fi
+
+  run_decisions "$home" resolve "$origin" cleanup --decision-file "$home/cleanup-decision.txt" \
+    --routed-to sample-cleanup-implementation >/dev/null \
+    || fail "retry after the transient update failure did not succeed"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: done" "retried resolve did not close the hold"
+  assert_contains "$show" "Resolution recorded by fm-decision-hold" "retried resolve lost the decision record"
+  if ls "$home/state"/.fm-decision-resolve-body.* >/dev/null 2>&1; then
+    fail "successful resolve leaked its private body file"
+  fi
+  pass "a failed update leaves the hold open with no leaked body file, and retry still succeeds"
+}
+
+# Regression guard: the resolution body must travel as --body-file, never as a
+# raw --body argument, so a future edit cannot silently revert the fix.
+test_resolve_routes_decision_body_through_body_file() {
+  local home origin hold argv_log
+  home=$(make_home body-file-route)
+  origin=sample-route-check-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Investigate sample route-check decisions" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create route-check origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Sample route-check review\n\nOne captain choice remains.\n' > "$home/data/$origin/report.md"
+
+  hold=$(run_decisions "$home" hold "$origin" route-check \
+    --title "Choose the sample route-check route" --reason "captain route-check choice pending" --repo sample) \
+    || fail "could not register route-check hold"
+  tasks_in "$home" add sample-route-check-implementation "Apply the selected sample route-check route" \
+    --kind ship --repo sample >/dev/null \
+    || fail "could not create route-check dependent fixture"
+  tasks_in "$home" block sample-route-check-implementation --by "$hold" >/dev/null \
+    || fail "could not route dependent work behind the route-check hold"
+
+  argv_log="$home/update-argv.log"
+  cat > "$home/fakebin/tasks-axi" <<FAKEEOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = update ]; then
+  printf '%s\n' "\$@" >> "$argv_log"
+fi
+exec "\$REAL_TASKS_AXI" "\$@"
+FAKEEOF
+  chmod +x "$home/fakebin/tasks-axi"
+
+  printf 'Use the short sample route-check decision.\n' > "$home/route-check-decision.txt"
+  run_decisions "$home" resolve "$origin" route-check --decision-file "$home/route-check-decision.txt" \
+    --routed-to sample-route-check-implementation >/dev/null \
+    || fail "could not resolve the route-check fixture"
+
+  grep -Fqx -- "--body-file" "$argv_log" \
+    || fail "resolve must publish the body via --body-file"
+  if grep -Fqx -- "--body" "$argv_log"; then
+    fail "resolve must not fall back to a raw --body argument"
+  fi
+  pass "resolve publishes the decision body via --body-file, never a raw --body argument"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -560,3 +709,6 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
+test_resolve_preserves_multiline_special_character_decision_body
+test_resolve_cleans_up_private_body_file_and_preserves_failure_ordering
+test_resolve_routes_decision_body_through_body_file

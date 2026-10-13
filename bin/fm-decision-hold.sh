@@ -368,7 +368,7 @@ EOF
 }
 
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
+  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' body_file='' body_rc=0 routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -434,8 +434,13 @@ command_resolve() {
   for dep in $routed; do
     body="${body}- ${dep}"$'\n'
   done
-  tasks_axi update "$id" --body "$body" >/dev/null \
-    || fail "could not record the captain decision on $id"
+  body_file=$(umask 077; mktemp "$STATE/.fm-decision-resolve-body.XXXXXX") \
+    || fail "could not create a private body file for $id"
+  printf '%s' "$body" > "$body_file"
+  body_rc=0
+  tasks_axi update "$id" --body-file "$body_file" >/dev/null || body_rc=$?
+  rm -f -- "$body_file"
+  [ "$body_rc" -eq 0 ] || fail "could not record the captain decision on $id"
   for dep in $routed; do
     show=$(task_show "$dep") || fail "routed task $dep disappeared before routing"
     blocked=$(show_field "$show" blocked_by | tr -d '[:space:]')
