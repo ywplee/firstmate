@@ -68,6 +68,14 @@ unset FM_TASK_ID
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
+# An asdf shim resolves its tool version from $HOME, and suites that repoint
+# HOME at a fixture then see tasks-axi as missing or incompatible. Put the real
+# binary's directory first on PATH so those cases keep finding it.
+if tasks_axi_real=$(asdf which tasks-axi 2>/dev/null) && [ -x "$tasks_axi_real" ]; then
+  PATH="$(dirname "$tasks_axi_real"):$PATH"
+fi
+unset tasks_axi_real
+
 # Write the tracked default backlog configuration into a fixture home. Never copy
 # "$ROOT/.tasks.toml": an operator's primary checkout keeps a gitignored override
 # there (for example a beads backend at its live backlog), so a copy points the
