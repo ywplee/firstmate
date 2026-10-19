@@ -2356,4 +2356,25 @@ test_keep_ai_trailers_reaches_secondmate_crew_launches
 test_claude_secondmate_launch_carries_the_attribution_policy
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
+test_claude_github_token_forwarding() {
+  local rec id out status launch value
+  for value in fixture-github-token ''; do
+    id=token-${value:-absent}
+    rec=$(make_spawn_case "$id" claude "$id")
+    read_case_record "$rec"
+    out=$(FM_TEST_GH_TOKEN="$value" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 0 "$status" "token fixture should spawn: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    if [ -n "$value" ]; then
+      assert_contains "$launch" "GH_TOKEN='fixture-github-token'" "invoking token must reach the worker"
+    else
+      assert_not_contains "$launch" 'GH_TOKEN=' "an absent invoking token must leave pane credentials alone"
+    fi
+  done
+  pass 'Claude forwards an explicit invoking GitHub token and leaves absent tokens alone'
+}
+
+test_claude_github_token_forwarding
+
 echo "# all fm-spawn-dispatch-profile tests passed"
