@@ -636,6 +636,11 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
+IFS= read -r -d '' PACING_LINE <<'EOF2' || true
+Time matters here: do not spend time that can be avoided, and the earlier a correct result is obtained, the better.
+EOF2
+TASK_SECTION="$TASK_SECTION"$'\n\n'"${PACING_LINE%$'\n'}"
+
 # One shared string keeps the ship and scout infrastructure rule identical.
 # Rule 2 governs file edits, so it does not prohibit pool administration.
 # The secondmate charter deliberately omits this rule because a secondmate

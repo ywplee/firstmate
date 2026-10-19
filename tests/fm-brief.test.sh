@@ -1639,6 +1639,27 @@ test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
+test_every_brief_variant_carries_the_pacing_sentence() {
+  local home sentence id kind mode brief count
+  home="$TMP_ROOT/pacing-home"
+  write_registry "$home"
+  sentence="Time matters here: do not spend time that can be avoided, and the earlier a correct result is obtained, the better."
+  for kind in no-mistakes direct-PR local-only scout; do
+    id="brief-pacing-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1 \
+        || fail "$id: scout scaffold failed"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$kind" >/dev/null 2>&1 \
+        || fail "$id: ship scaffold failed"
+    fi
+    brief="$home/data/$id/brief.md"
+    count=$(grep -cxF "$sentence" "$brief")
+    [ "$count" = 1 ] || fail "$id: pacing sentence appears $count times, expected exactly once"
+  done
+  pass "fm-brief.sh: every ship and scout brief carries the pacing sentence exactly once"
+}
+
 test_no_mistakes_dod_wording
 test_no_mistakes_dod_green_detection
 test_pr_based_dod_requires_non_draft
@@ -1669,3 +1690,4 @@ test_branch_prefix_is_refused_where_it_does_not_apply
 test_branch_prefix_value_is_validated
 test_branch_prefix_command_is_shell_safe
 test_crewmate_scaffolds_forbid_pool_administration
+test_every_brief_variant_carries_the_pacing_sentence
