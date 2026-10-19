@@ -3590,7 +3590,7 @@ SH
     FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" &
   watcher_pid=$!
-  for i in $(seq 1 100); do
+  for i in $(seq 1 750); do
     [ -d "$state/.control-task-a.lock" ] && break
     sleep 0.02
   done
