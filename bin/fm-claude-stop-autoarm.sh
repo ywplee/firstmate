@@ -399,11 +399,11 @@ ACTIONABLE=0
 HEALTHY=0
 HOST_MODE=0
 HOST_RC=0
-ACTIONABLE_RE='^(signal:|stale:|check:|heartbeat($|:))'
+ACTIONABLE_RE='^(signal:|stale:|blocked:|check:|heartbeat($|:))'
 # The home gate's owner decides (docs/configuration.md "Supervision host").
 if fm_supervision_host_enabled "$CONFIG" claude; then
   HOST_MODE=1
-  ACTIONABLE_RE='^(signal:|stale:|check:|heartbeat($|:)|supervision-host:)'
+  ACTIONABLE_RE='^(signal:|stale:|blocked:|check:|heartbeat($|:)|supervision-host:)'
 fi
 attempt=0
 while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
@@ -522,9 +522,9 @@ if [ "$ACTIONABLE" -eq 1 ]; then
   {
     printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
     if [ "$HOST_MODE" -eq 1 ]; then
-      [ -n "$OUT" ] && awk '/^supervision-host:/ { print; next } /^(signal:|stale:|check:|heartbeat)/ && shown++ < 8' "$OUT" 2>/dev/null
+      [ -n "$OUT" ] && awk '/^supervision-host:/ { print; next } /^(signal:|stale:|blocked:|check:|heartbeat)/ && shown++ < 8' "$OUT" 2>/dev/null
     else
-      [ -n "$OUT" ] && grep -E '^(signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
+      [ -n "$OUT" ] && grep -E '^(signal:|stale:|blocked:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
     fi
     if [ "$HOST_MODE" -eq 1 ] && [ -e "$STATE/.afk-contract" ] \
       && [ "$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" mode 2>/dev/null)" != quiet ]; then
@@ -569,7 +569,7 @@ if [ ! -e "$FAILURE_NOTICE" ]; then
   fi
   {
     printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after %s bounded attempts, and no live watcher with a fresh beacon was verified.\n' "$attempt"
-    [ -n "$OUT" ] && grep -E '^(watcher:|signal:|stale:|check:|heartbeat|supervision-host)' "$OUT" 2>/dev/null | head -8
+    [ -n "$OUT" ] && grep -E '^(watcher:|signal:|stale:|blocked:|check:|heartbeat|supervision-host)' "$OUT" 2>/dev/null | head -8
     [ "$HOST_MODE" -eq 0 ] || printf 'The supervision host (docs/supervision-host.md) ran these cycles; its last one exited %s without a wake.\n' "$HOST_RC"
     printf 'Do not launch a manual background arm from this notice; investigate the automatic Stop hook and watcher startup before ending blind.\n'
   } >&2

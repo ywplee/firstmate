@@ -10,6 +10,8 @@ scratchpad*
 __pycache__/
 *.pyc
 .env
+treehouse.toml
+.claude/settings.local.json
 config/
 
 .tools/

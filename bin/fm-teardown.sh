@@ -197,7 +197,10 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record] | <secondmate-id> --stop
+#   --stop closes only an idle local secondmate endpoint and records stopped=1;
+#   its home, lease, backlog, and registry entry survive. An unknown backlog is
+#   not idle proof. Never combines with --force or --legacy-record.
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
@@ -408,11 +411,13 @@ fi
 ID=$1
 TEARDOWN_LOST_SLOT_EXIT=4
 FORCE=
+STOP=0
 LEGACY_RECORD_GIVEN=0
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
+    --stop) STOP=1 ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
     *)
       echo "error: invalid teardown request" >&2
@@ -421,6 +426,10 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+if [ "$STOP" = 1 ] && { [ -n "$FORCE" ] || [ "$LEGACY_RECORD_GIVEN" = 1 ]; }; then
+  echo "error: --stop cannot combine with --force or --legacy-record" >&2
+  exit 2
+fi
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -3425,6 +3434,27 @@ remove_secondmate_registry_entry() {
 
 require_exclusive_task_worktree_slot || exit 1
 require_owned_task_worktree_slot || exit 1
+
+if [ "$STOP" = 1 ]; then
+  [ "$KIND" = secondmate ] || { echo "error: --stop applies only to a secondmate" >&2; exit 2; }
+  [ -z "$(fm_meta_get "$META" remote_host)" ] || { echo "error: --stop requires a local secondmate; remote lifecycle stays on its owning host" >&2; exit 1; }
+  . "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
+  [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  if fm_secondmate_domain_has_work "$STATE" "$ID" "$HOME_PATH"; then
+    echo "REFUSED: secondmate $ID still has work or cannot be proven idle" >&2
+    exit 1
+  fi
+  if ! fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID"; then
+    echo "error: secondmate $ID endpoint could not be closed; stopped state was not recorded" >&2
+    exit 1
+  fi
+  fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+  if ! grep -q '^stopped=1$' "$META"; then
+    printf 'stopped=1\n' >> "$META"
+  fi
+  echo "stopped secondmate $ID (home, lease, backlog, and registry entry preserved)"
+  exit 0
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 

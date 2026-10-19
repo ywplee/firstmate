@@ -284,12 +284,48 @@ fm_session_lock_anchor_pid() {
 # silently owned with a dead anchor. A missing lock, a malformed lock, a lock
 # held by a harness outside this ancestry under another (or no) session id, or
 # an ancestry that cannot be resolved all fail closed.
+fm_session_lock_identity_matches() {
+  local state=$1 pid=$2 recorded current bound
+  recorded=$(sed -n '2s/^identity=//p' "$state/.lock" 2>/dev/null || true)
+  if [ -z "$recorded" ] && [ -e "$state/.lock-identity" ]; then
+    [ -f "$state/.lock-identity" ] && [ ! -L "$state/.lock-identity" ] || return 1
+    bound=$(head -n 1 "$state/.lock-identity") || return 1
+    if [ "$bound" = "$pid" ]; then
+      recorded=$(sed -n '2p' "$state/.lock-identity") || return 1
+      [ -n "$recorded" ] || return 1
+    fi
+  fi
+  [ -n "$recorded" ] || return 0
+  if ! declare -F fm_pid_identity >/dev/null; then
+    . "${BASH_SOURCE[0]%/*}/fm-wake-lib.sh"
+  fi
+  current=$(fm_pid_identity "$pid") || return 1
+  [ "$current" = "$recorded" ]
+}
+
+fm_session_lock_holder_alive() {
+  fm_session_lock_identity_matches "$1" "$2" && fm_harness_pid_alive "$2"
+}
+
+fm_session_lock_publish_identity() {
+  local state=$1 pid=$2 identity tmp body
+  identity=$(fm_pid_identity "$pid") || return 1
+  tmp=$(umask 077; mktemp "$state/.lock-identity.XXXXXX") || return 1
+  if ! printf '%s\n%s\n' "$pid" "$identity" > "$tmp" || ! mv -f "$tmp" "$state/.lock-identity"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  body=$(cat "$state/.lock") || return 1
+  [ "$body" = "$pid" ] || printf '%s\n' "$pid" > "$state/.lock"
+}
+
 fm_session_lock_owned_by_self() {
   local state=$1 lock_pid pids
-  lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
+  lock_pid=$(head -n 1 "$state/.lock" 2>/dev/null || true)
   case "$lock_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
+  fm_session_lock_identity_matches "$state" "$lock_pid" || return 1
   pids=$(fm_harness_ancestry_pids) || return 1
   fm_harness_pid_listed "$lock_pid" "$pids" && return 0
   fm_session_lock_same_session "$state" "$pids" || return 1
@@ -307,11 +343,11 @@ fm_session_lock_foreign_owner_live() {
   local state=$1 lock_pid pids
   FM_SESSION_LOCK_FOREIGN_OWNER_PID=
   [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 1
-  lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
+  lock_pid=$(head -n 1 "$state/.lock" 2>/dev/null || true)
   case "$lock_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  fm_harness_pid_alive "$lock_pid" || return 1
+  fm_session_lock_holder_alive "$state" "$lock_pid" || return 1
   pids=$(fm_harness_ancestry_pids) || return 1
   fm_harness_pid_listed "$lock_pid" "$pids" && return 1
   fm_session_lock_same_session "$state" "$pids" && return 1
@@ -370,7 +406,10 @@ fm_session_lock_inspect() {  # <state>
       ;;
   esac
   if kill -0 "$pid" 2>/dev/null; then
-    if fm_harness_pid_alive "$pid"; then
+    if ! fm_session_lock_identity_matches "$state" "$pid"; then
+      FM_LOCK_INSPECT_STATE=stale
+      FM_LOCK_INSPECT_LIVE_HARNESS=false
+    elif fm_harness_pid_alive "$pid"; then
       FM_LOCK_INSPECT_STATE=held
       FM_LOCK_INSPECT_LIVE_HARNESS=true
     else

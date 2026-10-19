@@ -4,7 +4,10 @@
 # probing and recovery. bin/fm-bootstrap.sh owns the session-start sweep and
 # bin/fm-watch.sh owns the ordinary-supervision poll tick; both drive this
 # library so classification handling and the guarded relaunch path stay
-# single-sourced here.
+# single-sourced here. An intentionally stopped local mate stays down; an idle
+# local home is not auto-relaunched. The route mode bypasses that idle gate
+# under the same liveness lock when new work arrives. Remote recovery retains
+# its upstream behavior because this host cannot inspect a remote backlog.
 #
 # A secondmate's recorded endpoint is the tmux window, herdr pane, or remote
 # peer it runs in. Probing classifies that endpoint through the owning backend
@@ -132,10 +135,43 @@ fm_secondmate_liveness_recent_attempts() {  # <id> <window-secs>
 #
 # The caller must hold fm_secondmate_liveness_lock for <id> whenever a
 # relaunchable verdict could be acted on.
+fm_secondmate_domain_has_work() {
+  local parent_state=$1 id=$2 home=$3 child_meta backend
+  [ -d "$home/data" ] && [ -d "$home/state" ] || return 0
+  for child_meta in "$home"/state/*.meta; do
+    [ -e "$child_meta" ] && return 0
+  done
+  . "$FM_SM_LIVE_LIB_DIR/fm-tasks-axi-lib.sh"
+  backend=$(fm_tasks_axi_backend "$home") || return 0
+  [ "$backend" = markdown ] || return 0
+  if [ -e "$home/data/backlog.md" ]; then
+    [ -f "$home/data/backlog.md" ] && [ -r "$home/data/backlog.md" ] || return 0
+    grep -qE '^[[:space:]]*- \[ \]' "$home/data/backlog.md" && return 0
+  fi
+  . "$FM_SM_LIVE_LIB_DIR/fm-pending-reply-lib.sh"
+  fm_pending_reply_task_has_open "$parent_state" "$id" && return 0
+  return 1
+}
+
 fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   local meta=$1 id=$2 mode=$3
   FM_SM_LIVE_STATUS=skipped FM_SM_LIVE_STATE=unknown FM_SM_LIVE_KILL=0
   FM_SM_LIVE_CAUSE='' FM_SM_LIVE_WHERE='' FM_SM_LIVE_REASON='' FM_SM_LIVE_LINE=''
+  if [ "$mode" != route ]; then
+    if [ "$(fm_meta_get "$meta" stopped)" = 1 ]; then
+      FM_SM_LIVE_STATUS=silent
+      return 0
+    fi
+    if [ -z "$(fm_meta_get "$meta" remote_host)" ]; then
+      local home
+      home=$(fm_meta_get "$meta" home)
+      [ -n "$home" ] || home=$(fm_meta_get "$meta" worktree)
+      if ! fm_secondmate_domain_has_work "$STATE" "$id" "$home"; then
+        FM_SM_LIVE_STATUS=silent
+        return 0
+      fi
+    fi
+  fi
   local window harness remote_host remote_rc out agent_state readiness_reason route_out remote_backend
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] || { FM_SM_LIVE_STATUS=silent; return 0; }

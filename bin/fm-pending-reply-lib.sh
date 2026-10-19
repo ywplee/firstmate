@@ -157,6 +157,20 @@ fm_pending_reply_grace_secs() {
   printf '%s' "$g"
 }
 
+fm_pending_reply_effective_grace_secs() {
+  local warm cold
+  warm=$(fm_pending_reply_grace_secs)
+  case "${FM_PENDING_REPLY_COLD_SPAWN:-}" in
+    1|true|yes)
+      cold=${FM_PENDING_REPLY_COLD_SPAWN_GRACE_SECS:-600}
+      case "$cold" in ''|*[!0-9]*) cold=600 ;; esac
+      [ "$cold" -ge "$warm" ] || cold=$warm
+      printf '%s' "$cold"
+      ;;
+    *) printf '%s' "$warm" ;;
+  esac
+}
+
 # Directory holding durable pending-reply records for <state-dir>.
 fm_pending_reply_dir() {  # <state-dir>
   local state=$1
@@ -368,7 +382,7 @@ wrong_home_hits=0
 wrong_home_first_sighting=
 wrong_home_sightings=
 wrong_home_scan_signature=
-grace_secs=$(fm_pending_reply_grace_secs)
+grace_secs=$(fm_pending_reply_effective_grace_secs)
 EOF
   chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$rec" || return 1

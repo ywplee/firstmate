@@ -183,6 +183,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 mkdir -p "$STATE"
 # A home that never existed (a state-only test fixture) is not a home that
 # disappeared, so the per-poll home-gone exit below applies only when it did.
@@ -222,6 +224,7 @@ WATCH_HOME_EXISTED=0
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+. "$SCRIPT_DIR/fm-bare-guard-lib.sh"
 # Parent-owned secondmate missed-report guards: durable pending-reply
 # expectations created by fm-send on marked secondmate requests. The tick is
 # cheap when no records exist and never scrapes secondmate conversation.
@@ -1163,6 +1166,7 @@ secondmate_liveness_tick() {
 # pane/hash state resets to genuinely active (see the two rm-on-reset call sites
 # below).
 FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
+FM_WEDGE_FORCE_ACTION_COUNT=${FM_WEDGE_FORCE_ACTION_COUNT:-$((FM_WEDGE_DEMAND_INSPECT_COUNT * 10))}
 
 # Bounds for the opt-in operator guard consult (wedge_guard_evidence): seconds
 # one guard may run before it is treated as no answer, and consecutive windows
@@ -1692,6 +1696,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n$guard_note)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
           reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone$guard_note)"
+        fi
+        if [ "$n" -ge "$FM_WEDGE_FORCE_ACTION_COUNT" ]; then
+          reason="blocked: $win (idle ${age}s, possible wedge, escalation $n exceeded the force-action threshold - act now: load stuck-crewmate-recovery$guard_note)"
         fi
         reason=$(stale_reason_naming_dialog "$reason" "$dialog")
         fm_wake_append stale "$win" "$reason" || exit 1
@@ -2590,6 +2597,34 @@ event_wait_or_sleep() {
 # --- Main entry: the runtime below runs only when this file is executed as a
 # script. When sourced (unit tests loading the functions above), return here
 # before acquiring the singleton lock or entering the blocking loop.
+_bare_surfaced_path() { printf '%s/.bare-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr '/.:' '___')"; }
+
+bare_scan_find_flip() {
+  local proj sig sf surfaced verdict reason
+  [ -d "$PROJECTS" ] || return 1
+  for proj in "$PROJECTS"/*; do
+    [ -d "$proj/.git" ] || continue
+    if ! fm_bare_is_true "$proj"; then
+      rm -f "$(_bare_surfaced_path "$proj")" 2>/dev/null || true
+      fm_bare_clear_incident_marker "$proj" "$STATE"
+      continue
+    fi
+    sig=$(status_observed_signature "$proj/.git/config")
+    sf=$(_bare_surfaced_path "$proj")
+    surfaced=$(cat "$sf" 2>/dev/null || true)
+    [ "$surfaced" = "$sig" ] && continue
+    verdict=$(fm_bare_classify "$proj")
+    if [ "$verdict" = repairable ]; then
+      reason="check: project-bare: $(basename "$proj"): core.bare=true on a populated work tree clone - run fleet sync to repair"
+    else
+      reason="check: project-bare: $(basename "$proj"): core.bare=true but $verdict - needs attention"
+    fi
+    printf '%s\t%s\t%s\n' "$proj" "$sig" "$reason"
+    return 0
+  done
+  return 1
+}
+
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi
@@ -2968,6 +3003,17 @@ while :; do
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
+    if bare_rec=$(bare_scan_find_flip); then
+      bare_clone=${bare_rec%%	*}
+      bare_rest=${bare_rec#*	}
+      bare_sig=${bare_rest%%	*}
+      bare_reason=${bare_rest#*	}
+      fm_bare_capture_incident "$bare_clone" "$DATA" "$STATE" >/dev/null || true
+      fm_wake_append check project-bare "$bare_reason" || exit 1
+      printf '%s' "$bare_sig" > "$(_bare_surfaced_path "$bare_clone")"
+      touch "$STATE/.last-check"
+      wake "$bare_reason"
+    fi
     rejected_checks=
     contribution_check_output=
     for c in "$STATE"/*.check.sh; do

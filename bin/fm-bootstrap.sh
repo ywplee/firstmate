@@ -329,7 +329,7 @@ fleet_sync_relay_filtered_output() {
       *': skipped: no origin remote') ;;
       *': skipped:'*) echo "FLEET_SYNC: $line" ;;
       *': STUCK:'*) echo "FLEET_SYNC: $line" ;;
-      *': recovered:'*) echo "FLEET_SYNC: $line" ;;
+      *': recovered:'*|*': repaired:'*) echo "FLEET_SYNC: $line" ;;
     esac
   done < "$tmp"
 }
@@ -1492,7 +1492,25 @@ detect_local_tools() {
   fi
 }
 
+project_bare_check() {
+  local proj label verdict
+  [ -d "$PROJECTS" ] || return 0
+  for proj in "$PROJECTS"/*; do
+    [ -d "$proj/.git" ] || continue
+    fm_bare_is_true "$proj" || continue
+    label=$(basename "$proj")
+    verdict=$(fm_bare_classify "$proj")
+    if [ "$verdict" = repairable ]; then
+      echo "PROJECT_BARE: $label: core.bare=true on a populated work tree clone - fleet sync will reset it"
+    else
+      echo "PROJECT_BARE: $label: core.bare=true but $verdict"
+    fi
+  done
+}
+
 detect_local_config() {
+  . "$SCRIPT_DIR/fm-bare-guard-lib.sh"
+  project_bare_check
   # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
   # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
   # primary only; detached-HEAD worktrees and secondmate homes never trip it.

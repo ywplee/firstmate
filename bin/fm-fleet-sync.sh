@@ -40,6 +40,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+. "$SCRIPT_DIR/fm-bare-guard-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # Inert unless FM_TIMING_LOG names a file; only the deferred network stage sets it.
@@ -314,6 +317,19 @@ sync_project() {
   # and fast-forward that repository under this project's label, turning a routine
   # refresh into an unrequested self-update reported as a project sync. Require
   # $PROJ to be the root of its own work tree before any other git command runs.
+  if [ -d "$PROJ/.git" ] && fm_bare_is_true "$PROJ"; then
+    fm_bare_capture_incident "$PROJ" "$DATA" "$STATE" >/dev/null || true
+    verdict=$(fm_bare_classify "$PROJ")
+    if [ "$verdict" != repairable ]; then
+      echo "$label: STUCK: core.bare flipped to true but $verdict - needs attention"
+      return 0
+    fi
+    if ! fm_bare_repair "$PROJ" "$DATA"; then
+      echo "$label: STUCK: core.bare repair failed - needs attention"
+      return 0
+    fi
+    echo "$label: repaired: core.bare was flipped to true on a clean populated work tree - continuing sync"
+  fi
   proj_top=$(git -C "$PROJ" rev-parse --show-toplevel 2>/dev/null) || proj_top=""
   if [ -z "$proj_top" ]; then
     echo "$label: skipped: not a git repo"

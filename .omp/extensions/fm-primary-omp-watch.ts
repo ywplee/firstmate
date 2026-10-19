@@ -249,7 +249,7 @@ function markLoaded(): void {
 
 function actionableLine(output: string): string {
   const lines = output.split(/\r?\n/);
-  return lines.find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line)) || "";
+  return lines.find((line) => /^(signal:|stale:|blocked:|check:|heartbeat($|:))/.test(line)) || "";
 }
 
 function completedActionableLine(output: string): string {
@@ -283,7 +283,7 @@ function hostWakeMessage(output: string): string {
   let shown = 0;
   const lines = output.split(/\r?\n/).filter((line) => {
     if (/^supervision-host:/.test(line)) return true;
-    if (/^(signal:|stale:|check:|heartbeat($|:))/.test(line) && shown < 8) {
+    if (/^(signal:|stale:|blocked:|check:|heartbeat($|:))/.test(line) && shown < 8) {
       shown += 1;
       return true;
     }

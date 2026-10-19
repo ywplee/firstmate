@@ -9,7 +9,10 @@
 # trusted session id the anchor is CLAUDE_PID, the model-loop process, so a
 # shared transient daemon or a front-end that outlives the session never keeps
 # a dead session's lock alive. Line 1 keeps its whole-line pid format because
-# every other reader takes the first line as the pid.
+# every other reader takes the first line as the pid. state/.lock-identity
+# binds that pid to fm_pid_identity under the same claim lock, so a recycled
+# harness pid is stale. Legacy PID-only locks remain readable; the fork's old
+# identity= second line is checked and normalized on an owned acquisition.
 #
 # The trusted id itself is recorded beside the lock in state/.lock-session, a
 # sidecar written only here and only under the claim lock: refreshed on every
@@ -129,6 +132,12 @@ restore_uncommitted_lock_session() {
   LOCK_SESSION_KIND=0
 }
 commit_lock_session() {
+  local recorded
+  recorded=$(head -n 1 "$LOCK") || exit 1
+  if ! fm_session_lock_publish_identity "$STATE" "$recorded"; then
+    echo "error: cannot record session process identity; operate read-only until resolved" >&2
+    exit 1
+  fi
   LOCK_SESSION_PHASE=0
   LOCK_SESSION_KIND=0
   rm -f "$LOCK_SESSION_PREV" 2>/dev/null || true
@@ -205,7 +214,7 @@ confirm_own_lock() {  # <recorded-pid>
     CLAIM_LOCK_HELD=1
     waited=1
   fi
-  recorded=$(cat "$LOCK" 2>/dev/null || true)
+  recorded=$(head -n 1 "$LOCK" 2>/dev/null || true)
   if [ "$recorded" = "$me" ] || fm_session_lock_owned_by_self "$STATE"; then
     if [ "$recorded" != "$me" ] && pids=$(fm_harness_ancestry_pids) \
       && ! fm_harness_pid_listed "$recorded" "$pids" \
@@ -237,12 +246,12 @@ refuse_live_owner() {  # <recorded-pid>
 }
 
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
-  old=$(cat "$LOCK" 2>/dev/null || true)
+  old=$(head -n 1 "$LOCK" 2>/dev/null || true)
   if [ "$old" = "$me" ] || fm_session_lock_owned_by_self "$STATE"; then
     confirm_own_lock "$old"
-    old=$(cat "$LOCK" 2>/dev/null || true)
+    old=$(head -n 1 "$LOCK" 2>/dev/null || true)
   fi
-  if [ -z "$REANCHOR" ] && fm_harness_pid_alive "$old"; then
+  if [ -z "$REANCHOR" ] && fm_session_lock_holder_alive "$STATE" "$old"; then
     refuse_live_owner "$old"
   fi
 fi
@@ -264,16 +273,16 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is not a regular file; operate read-only until resolved" >&2
     exit 1
   fi
-  old=$(cat "$LOCK" 2>/dev/null) || {
+  old=$(head -n 1 "$LOCK" 2>/dev/null) || {
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
   }
   # A re-anchor decided above has held the claim lock since, so line 1 is the
   # pid it recorded and needs no second verdict.
-  if [ -z "$REANCHOR" ] && [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+  if [ -z "$REANCHOR" ] && [ "$old" != "$me" ] && fm_session_lock_holder_alive "$STATE" "$old"; then
     fm_session_lock_owned_by_self "$STATE" && confirm_own_lock "$old"
-    old=$(cat "$LOCK" 2>/dev/null || true)
-    if [ -z "$REANCHOR" ] && [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+    old=$(head -n 1 "$LOCK" 2>/dev/null || true)
+    if [ -z "$REANCHOR" ] && [ "$old" != "$me" ] && fm_session_lock_holder_alive "$STATE" "$old"; then
       refuse_live_owner "$old"
     fi
   fi

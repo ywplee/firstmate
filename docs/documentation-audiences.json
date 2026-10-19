@@ -603,6 +603,10 @@
     {
       "path": ".agents/skills/validation-supervision/SKILL.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/mobile-simulator-access.md",
+      "audience": "operator-current"
     }
   ]
 }

@@ -3801,6 +3801,46 @@ real_path_or_raw() { # <path>
   fi
 }
 
+expand_home_path() {
+  local p=$1
+  case "$p" in
+    '~') printf '%s\n' "$HOME" ;;
+    '~/'*) printf '%s\n' "$HOME/${p#\~/}" ;;
+    '$HOME') printf '%s\n' "$HOME" ;;
+    '$HOME/'*) printf '%s\n' "$HOME/${p#\$HOME/}" ;;
+    *) printf '%s\n' "$p" ;;
+  esac
+}
+
+codex_env_prefix=''
+if [ "$HARNESS" = codex ] && [ -f "$CONFIG/codex-home" ]; then
+  codex_home_selected=''
+  codex_prefix_len=-1
+  while IFS= read -r codex_rule || [ -n "$codex_rule" ]; do
+    codex_rule=${codex_rule#"${codex_rule%%[![:space:]]*}"}
+    case "$codex_rule" in ''|'#'*) continue ;; esac
+    read -r codex_rule_prefix codex_rule_home _codex_rest <<< "$codex_rule"
+    [ -n "$codex_rule_prefix" ] && [ -n "$codex_rule_home" ] || continue
+    codex_rule_prefix=$(expand_home_path "$codex_rule_prefix")
+    codex_rule_home=$(expand_home_path "$codex_rule_home")
+    codex_rule_prefix_real=$(real_path_or_raw "$codex_rule_prefix")
+    if [ "$PROJ_ABS_REAL" = "$codex_rule_prefix_real" ] ||
+       [ "${PROJ_ABS_REAL#"$codex_rule_prefix_real"/}" != "$PROJ_ABS_REAL" ]; then
+      if [ "${#codex_rule_prefix_real}" -gt "$codex_prefix_len" ]; then
+        codex_prefix_len=${#codex_rule_prefix_real}
+        codex_home_selected=$codex_rule_home
+      fi
+    fi
+  done < "$CONFIG/codex-home"
+  if [ -n "$codex_home_selected" ]; then
+    if [ ! -d "$codex_home_selected" ] || [ ! -f "$codex_home_selected/auth.json" ]; then
+      echo "error: config/codex-home selects CODEX_HOME=$codex_home_selected for project $PROJ_ABS_REAL, but that directory is missing or has no auth.json; refusing to launch a codex worker" >&2
+      exit 1
+    fi
+    codex_env_prefix="CODEX_HOME=$(shell_quote "$codex_home_selected") "
+  fi
+fi
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -6076,6 +6116,9 @@ esac
 # A home's worker account pin replaces that forwarding: the launch names the
 # pinned root (or unsets the variable for the ordinary Claude account) and
 # sheds the environment credentials Claude ranks above the root's login.
+if [ -n "$codex_env_prefix" ]; then
+  LAUNCH="${codex_env_prefix}${LAUNCH}"
+fi
 if [ -n "$WORKER_ACCOUNT" ]; then
   case "$HARNESS" in
   claude)
@@ -6091,6 +6134,9 @@ if [ -n "$WORKER_ACCOUNT" ]; then
   esac
 elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+if [ "$HARNESS" = claude ] && [ -n "${GH_TOKEN:-}" ]; then
+  LAUNCH="GH_TOKEN=$(shell_quote "$GH_TOKEN") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")

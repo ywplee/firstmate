@@ -1233,3 +1233,30 @@ test_failed_lock_write_removes_new_sidecar_when_none_existed
 test_verified_reclaim_keeps_new_sidecar
 test_reanchor_keeps_task_leases_live
 test_reanchor_keeps_autoarm_midturn_healthy
+
+test_session_status_rejects_recycled_identity() (
+  local dir peer identity out
+  dir="$TMP_ROOT/recycled-identity"
+  mkdir -p "$dir/state" "$dir/bin"
+  ln -s "$(command -v sleep)" "$dir/bin/claude"
+  "$dir/bin/claude" 60 &
+  peer=$!
+  trap 'kill "$peer" 2>/dev/null || true; wait "$peer" 2>/dev/null || true' EXIT
+  printf '%s\n' "$peer" > "$dir/state/.lock"
+  identity=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"' _ "$ROOT" "$peer") \
+    || fail 'could not identify the real fixture process'
+  printf '%s\n%s\n' "$peer" "$identity" > "$dir/state/.lock-identity"
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" 'held by live harness' 'matching identity lost the live owner'
+  printf '%s\n%s\n' "$peer" 'previous process identity' > "$dir/state/.lock-identity"
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" 'stale' 'a recycled harness PID kept the session lock alive'
+  rm "$dir/state/.lock-identity"
+  printf '%s\nidentity=%s\n' "$peer" "$identity" > "$dir/state/.lock"
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" 'held by live harness' 'legacy fork identity format became unreadable'
+  pass 'session status honors matching process identities and rejects a reused PID, including legacy fork locks'
+)
+
+test_session_status_rejects_recycled_identity

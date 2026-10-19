@@ -337,7 +337,7 @@ function retireGenerationOwner(generation: SessionGeneration, replacement: boole
 
 function actionableLine(output: string): string {
   const lines = output.split(/\r?\n/);
-  return lines.find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line)) || "";
+  return lines.find((line) => /^(signal:|stale:|blocked:|check:|heartbeat($|:))/.test(line)) || "";
 }
 
 function completedActionableLine(output: string): string {

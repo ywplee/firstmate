@@ -1073,7 +1073,7 @@ ARM_OUT=$STARTED_ARM_OUT
 while :; do
   boundary_reached && boundary_exit
   await_close || boundary_exit
-  REASON=$(printf '%s\n' "$ARM_TEXT" | grep -E '^(signal:|stale:|check:|heartbeat($|:))' || true)
+  REASON=$(printf '%s\n' "$ARM_TEXT" | grep -E '^(signal:|stale:|blocked:|check:|heartbeat($|:))' || true)
 
   # The away daemon owns triage while its flag exists; the owner stands down.
   # A close with no wake is the arm's own failure or attach result, which the

@@ -714,6 +714,9 @@ There is no shared learnings file by captain decision.
 
 ## External memory tiers (Memory layering section)
 
+Harness memory can be shared by worktrees of the same repository and can change during a session.
+A concurrent-edit reminder alone is not evidence of malicious instructions; inspect the actual content and verify the underlying decision through its authoritative record.
+
 A home may declare memory stores outside firstmate, such as MCP-served knowledge stores, as authoritative for named classes of knowledge.
 The declaration lives in a `Memory layering` heading inside `data/captain.md`, or inside the primary home's `data/captain-shared.md` when every secondmate home should inherit it; a local `data/captain.md` declaration wins for that home when both exist.
 No declaration means firstmate's local files under `data/` are the only memory owners, which is the default.
@@ -1110,6 +1113,21 @@ The text is static and never executed or expanded; secondmate charters never tak
 `bin/fm-brief.sh`'s header owns the placement rule and its safety argument.
 
 ## Worker launch environment (config/launch-env-allowlist)
+
+### Fork Codex directory account map (config/codex-home)
+
+The optional gitignored `config/codex-home` maps each whitespace-separated `<source-project-prefix> <codex-home-directory>` pair to a Codex credential store.
+The longest matching physical project-directory prefix wins on a directory boundary, before creating the worker endpoint.
+Leading `~` and `$HOME` expand as paths; blank lines and comment lines are ignored.
+A selected directory must exist and contain `auth.json`, or launch refuses.
+An absent file or unmatched project preserves upstream's account selection.
+The map is inherited into secondmate homes; a Codex secondmate matches against its own home path.
+This map governs Codex only; upstream's [worker account pins](#worker-account-pin-configclaude-account-configpi-account) govern Claude and Pi.
+
+### Ambient worker environment
+
+Claude launches retain a nonempty spawning process's `GH_TOKEN` as an explicit launch assignment, preserving that process's GitHub identity across a daemon-backed terminal boundary.
+This does not provision the token into a remote machine or change global GitHub authentication.
 
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.
 With no file, ambient inheritance remains unfiltered: selected harness markers are cleared, while the provider, long-lived terminal daemon, and shell initialization determine which other variables reach the worker.

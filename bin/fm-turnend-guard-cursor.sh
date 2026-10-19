@@ -312,10 +312,10 @@ HEALTHY=0
 STAND_DOWN=0
 HOST_MODE=0
 HOST_RC=0
-ACTIONABLE_RE='^(signal:|stale:|check:|heartbeat($|:))'
+ACTIONABLE_RE='^(signal:|stale:|blocked:|check:|heartbeat($|:))'
 if fm_supervision_host_enabled "$CONFIG" cursor; then
   HOST_MODE=1
-  ACTIONABLE_RE='^(signal:|stale:|check:|heartbeat($|:)|supervision-host:)'
+  ACTIONABLE_RE='^(signal:|stale:|blocked:|check:|heartbeat($|:)|supervision-host:)'
 fi
 
 # Never leave an arm child or its capture file behind, on any exit path.
@@ -398,14 +398,14 @@ fi
 
 if [ "$ACTIONABLE" -eq 1 ]; then
   if [ "$HOST_MODE" -eq 1 ]; then
-    WAKE=$(awk '/^supervision-host:/ { print; next } /^(signal:|stale:|check:|heartbeat)/ && shown++ < 8' "$ARM_OUT" 2>/dev/null)
+    WAKE=$(awk '/^supervision-host:/ { print; next } /^(signal:|stale:|blocked:|check:|heartbeat)/ && shown++ < 8' "$ARM_OUT" 2>/dev/null)
     if [ -e "$STATE/.afk-contract" ] \
       && [ "$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" mode 2>/dev/null)" != quiet ]; then
       WAKE="$WAKE
 This wake comes from automatic supervision under the away-posture record, not from the captain: it is not a return, so handle it under the away posture."
     fi
   else
-    WAKE=$(grep -E '^(signal:|stale:|check:|heartbeat)' "$ARM_OUT" 2>/dev/null | head -8)
+    WAKE=$(grep -E '^(signal:|stale:|blocked:|check:|heartbeat)' "$ARM_OUT" 2>/dev/null | head -8)
   fi
   emit_followup watcher "firstmate watcher wake - one supervision event needs a handling turn now.
 $WAKE
