@@ -150,8 +150,8 @@ case "${1:-} ${2:-}" in
     ;;
   "pr view")
     case " $* " in
-      *statusCheckRollup*)
-        printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
+      *baseRefName*)
+        printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\"}"
         exit 0
         ;;
       *" --json isDraft "*)
@@ -178,6 +178,15 @@ case " $* " in
     ;;
   *" api repos/"*"/commits/"*"/statuses?per_page=100 "*)
     printf '%s\n' '[[]]'
+    ;;
+  *" api --paginate repos/"*"/actions/runs?head_sha="*)
+    printf '%s\n' "{\"workflow_runs\":[{\"id\":1,\"workflow_id\":1,\"name\":\"ci\",\"status\":\"completed\",\"conclusion\":\"success\",\"head_sha\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\"}]}"
+    ;;
+  *" api --paginate repos/"*"/actions/runs/1/jobs"*)
+    printf '%s\n' "{\"jobs\":[{\"name\":\"ci\",\"status\":\"completed\",\"conclusion\":\"success\",\"head_sha\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\"}]}"
+    ;;
+  *" api --paginate repos/"*"/commits/"*"/status?per_page=100 "*)
+    printf '%s\n' "{\"sha\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"statuses\":[]}"
     ;;
   *" api --paginate repos/"*"/rules/branches/"*merge_queue*)
     ;;

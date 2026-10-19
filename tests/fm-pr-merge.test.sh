@@ -164,6 +164,11 @@ assert_logged_gh_merge() {
     || fail "expected gh merge line: $line"$'\n'"got: $(grep '^pr merge ' "$case_dir/gh.log" || true)"
 }
 
+# A case describes its checks as one rollup in github-view.json (check_run,
+# status_context). The gh mock serves each check run as its own single-job
+# workflow run and each status context as a commit status at the head, the
+# shape GitHub Actions reports, unless the case writes explicit Actions payloads
+# under github-actions/ (use_actions_results).
 add_gh_mocks() {
   local case_dir=$1 head=$2
   write_github_live_json "$case_dir" "$head"
@@ -184,7 +189,8 @@ printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
-      *statusCheckRollup*)
+      *baseRefName*)
+        view_current="$(dirname "$FM_TEST_GH_VIEW_JSON")/github-view-current.json"
         if [ -n "${FM_TEST_GH_MERGEABLE_SEQUENCE:-}" ]; then
           call_n=$(( $(cat "$FM_TEST_GH_MERGEABLE_CALLS" 2>/dev/null || echo 0) + 1 ))
           printf '%s\n' "$call_n" > "$FM_TEST_GH_MERGEABLE_CALLS"
@@ -194,10 +200,11 @@ case "${1:-} ${2:-}" in
           read -r call_m call_c <<< "$call_m"
           jq -c --arg m "$call_m" --arg c "${call_c:-}" \
             '.mergeable = $m | if $c != "" then .statusCheckRollup[0].conclusion = $c else . end' \
-            "$FM_TEST_GH_VIEW_JSON"
+            "$FM_TEST_GH_VIEW_JSON" > "$view_current"
         else
-          cat "$FM_TEST_GH_VIEW_JSON"
+          cp "$FM_TEST_GH_VIEW_JSON" "$view_current"
         fi
+        jq -c 'del(.statusCheckRollup)' "$view_current"
         if [ -f "${FM_TEST_AWAY_RECORD_AFTER_VIEW:-}" ]; then
           if [ -s "${FM_TEST_AWAY_RECORD_AFTER_VIEW}" ]; then
             cp "$FM_TEST_AWAY_RECORD_AFTER_VIEW" "$FM_STATE_OVERRIDE/.afk-contract"
@@ -254,14 +261,56 @@ case "${1:-} ${2:-}" in
   api\ *)
     # The required-check reads: the branch itself, and its rules read without
     # the merge-queue filter the queue reader below applies.
+    actions_dir="$(dirname "$FM_TEST_GH_VIEW_JSON")/github-actions"
+    view_current="$(dirname "$FM_TEST_GH_VIEW_JSON")/github-view-current.json"
+    head=$(cat "$FM_TEST_GH_HEAD")
     case " $* " in
-      *" repos/"*"/commits/"*"/check-runs"*)
-        case "$*" in
-          *"/commits/$(cat "$FM_TEST_GH_HEAD")/check-runs"*) ;;
-          *) exit 1 ;;
-        esac
-        cat "$FM_TEST_GH_RUNS"
+      *" repos/"*"/actions/runs/"*"/jobs"*)
+        run_id="$*"
+        run_id=${run_id##*/actions/runs/}
+        run_id=${run_id%%/*}
+        if [ -d "$actions_dir" ]; then
+          cat "$actions_dir/jobs-$run_id.json"
+          exit $?
+        fi
+        jq -c --argjson id "$run_id" --arg head "$head" '
+          [.statusCheckRollup[] | select(.__typename == "CheckRun")][$id - 1]
+          | {jobs: [{name, status: (.status | ascii_downcase),
+                     conclusion: (.conclusion | if . == null then null else ascii_downcase end),
+                     started_at: .startedAt, head_sha: $head}]}' "$view_current"
         exit $?
+        ;;
+      *" repos/"*"/actions/runs?head_sha=$head&"*)
+        if [ -d "$actions_dir" ]; then
+          cat "$actions_dir/runs.json"
+          exit $?
+        fi
+        jq -c --arg head "$head" '
+          {workflow_runs: [[.statusCheckRollup[] | select(.__typename == "CheckRun")] | to_entries[]
+            | {id: (.key + 1), workflow_id: (.key + 1), name: .value.name,
+               status: (.value.status | ascii_downcase),
+               conclusion: (.value.conclusion | if . == null then null else ascii_downcase end),
+               run_started_at: .value.startedAt, head_sha: $head}]}' "$view_current"
+        exit $?
+        ;;
+      *" repos/"*"/commits/$head/status?"*)
+        if [ -d "$actions_dir" ]; then
+          cat "$actions_dir/status.json"
+          exit $?
+        fi
+        jq -c --arg head "$head" '
+          {sha: $head, statuses: [.statusCheckRollup[] | select(.__typename == "StatusContext")
+            | {context, state: (.state | ascii_downcase)}]}' "$view_current"
+        exit $?
+        ;;
+      *" apps/github-actions "*)
+        [ ! -e "$(dirname "$FM_TEST_GH_VIEW_JSON")/github-actions-app-fail" ] || exit 1
+        if [ -f "$(dirname "$FM_TEST_GH_VIEW_JSON")/github-actions-app.json" ]; then
+          cat "$(dirname "$FM_TEST_GH_VIEW_JSON")/github-actions-app.json"
+        else
+          printf '{"slug":"github-actions","id":15368}\n'
+        fi
+        exit 0
         ;;
       *" repos/"*"/rules/branches/"*merge_queue*) ;;
       *" repos/"*"/rules/branches/"*)
@@ -670,7 +719,6 @@ run_pr_merge() {
   FM_TEST_GH_MERGEABLE_SEQUENCE="${FM_TEST_GH_MERGEABLE_SEQUENCE:-}" \
   FM_TEST_GH_MERGEABLE_CALLS="$case_dir/mergeable-calls" \
   FM_TEST_GH_HEAD="$case_dir/github-head" \
-  FM_TEST_GH_RUNS="$case_dir/github-runs.json" \
   FM_TEST_GH_MERGE_RC_FILE="$case_dir/github-merge-rc" \
   FM_TEST_GH_MERGE_OUTPUT="$(cat "$case_dir/github-merge-output" 2>/dev/null || true)" \
   FM_TEST_GH_GRAPHQL_FAIL="$case_dir/github-graphql-fail" \
@@ -877,8 +925,8 @@ test_github_mergeable_unknown_retries_then_succeeds() {
   set -e
 
   expect_code 0 "$rc" "github-mergeable-unknown-then-mergeable: a merge should succeed once mergeable resolves"
-  [ "$(grep -c '^pr view .*statusCheckRollup' "$case_dir/gh.log")" -eq 2 ] \
-    || fail "github-mergeable-unknown-then-mergeable: expected exactly 2 mergeable reads, got $(grep -c '^pr view .*statusCheckRollup' "$case_dir/gh.log")"
+  [ "$(grep -c '^pr view .*baseRefName' "$case_dir/gh.log")" -eq 2 ] \
+    || fail "github-mergeable-unknown-then-mergeable: expected exactly 2 mergeable reads, got $(grep -c '^pr view .*baseRefName' "$case_dir/gh.log")"
   assert_logged_gh_merge "$case_dir" 83 example/repo --squash
   [ "$(grep -c '^pr merge ' "$case_dir/gh.log")" -eq 1 ] \
     || fail "github-mergeable-unknown-then-mergeable: the wrapper attempted more than one merge"
@@ -909,8 +957,8 @@ test_github_mergeable_unknown_exhausts_bound_and_reports_pending() {
   set -e
 
   expect_code 1 "$rc" "github-mergeable-unknown-exhausted: a mergeable read that never resolves must still fail"
-  [ "$(grep -c '^pr view .*statusCheckRollup' "$case_dir/gh.log")" -eq 5 ] \
-    || fail "github-mergeable-unknown-exhausted: expected exactly 5 bounded mergeable reads, got $(grep -c '^pr view .*statusCheckRollup' "$case_dir/gh.log")"
+  [ "$(grep -c '^pr view .*baseRefName' "$case_dir/gh.log")" -eq 5 ] \
+    || fail "github-mergeable-unknown-exhausted: expected exactly 5 bounded mergeable reads, got $(grep -c '^pr view .*baseRefName' "$case_dir/gh.log")"
   assert_no_grep 'pr merge' "$case_dir/gh.log" \
     "github-mergeable-unknown-exhausted: a merge was attempted while mergeable never resolved"
   assert_grep "mergeability for https://github.com/example/repo/pull/84 is still being computed by GitHub; retry shortly" \
@@ -940,8 +988,8 @@ test_github_mergeable_unknown_retry_rechecks_checks() {
   set -e
 
   expect_code 1 "$rc" "github-mergeable-unknown-check-turns-red: a check that turned red must refuse"
-  [ "$(grep -c '^pr view .*statusCheckRollup' "$case_dir/gh.log")" -eq 2 ] \
-    || fail "github-mergeable-unknown-check-turns-red: expected exactly 2 reads, got $(grep -c '^pr view .*statusCheckRollup' "$case_dir/gh.log")"
+  [ "$(grep -c '^pr view .*baseRefName' "$case_dir/gh.log")" -eq 2 ] \
+    || fail "github-mergeable-unknown-check-turns-red: expected exactly 2 reads, got $(grep -c '^pr view .*baseRefName' "$case_dir/gh.log")"
   assert_grep "check 'ci' is not green" "$case_dir/stderr" \
     "github-mergeable-unknown-check-turns-red: the re-check did not refuse the red check"
   assert_no_grep 'still being computed' "$case_dir/stderr" \
@@ -972,7 +1020,7 @@ test_github_mergeable_conflicting_is_not_retried() {
   set -e
 
   expect_code 1 "$rc" "github-mergeable-conflicting: a genuine conflict must refuse"
-  [ "$(grep -c '^pr view .*statusCheckRollup' "$case_dir/gh.log")" -eq 1 ] \
+  [ "$(grep -c '^pr view .*baseRefName' "$case_dir/gh.log")" -eq 1 ] \
     || fail "github-mergeable-conflicting: a genuine conflict was retried instead of refused immediately"
   assert_grep 'mergeable is "CONFLICTING", not MERGEABLE' "$case_dir/stderr" \
     "github-mergeable-conflicting: the conflict was not named"
@@ -4033,32 +4081,183 @@ run_required_case() {
   set -e
 }
 
+# Explicit GitHub Actions payloads for the head, in place of the rollup the gh
+# mock would otherwise translate. Starts with no run and no status.
+# Args: case_dir head_sha
+use_actions_results() {
+  local case_dir=$1 head=$2
+  mkdir -p "$case_dir/github-actions"
+  printf '{"total_count":0,"workflow_runs":[]}\n' > "$case_dir/github-actions/runs.json"
+  printf '{"sha":"%s","state":"pending","statuses":[]}\n' "$head" > "$case_dir/github-actions/status.json"
+}
+
+# One workflow run at the head with its latest attempt's jobs, each given as
+# name:status:conclusion with "-" for a null conclusion.
+# Args: case_dir head_sha run_id workflow_id workflow_name status conclusion [job]...
+add_actions_run() {
+  local case_dir=$1 head=$2 run_id=$3 workflow_id=$4 workflow=$5 status=$6 conclusion=$7 spec jobs='[]'
+  shift 7
+  for spec in "$@"; do
+    jobs=$(jq -c --arg spec "$spec" --arg head "$head" '
+      ($spec | split(":")) as $f
+      | . + [{name: $f[0], status: $f[1], conclusion: (if $f[2] == "-" then null else $f[2] end),
+              head_sha: $head, started_at: "2026-10-19T07:30:40Z"}]' <<< "$jobs")
+  done
+  jq -c --argjson jobs "$jobs" '{total_count: ($jobs | length), jobs: $jobs}' <<< '{}' \
+    > "$case_dir/github-actions/jobs-$run_id.json"
+  jq -c --arg head "$head" --argjson id "$run_id" --argjson wf "$workflow_id" --arg name "$workflow" \
+    --arg status "$status" --arg conclusion "$conclusion" '
+    .workflow_runs += [{id: $id, workflow_id: $wf, name: $name, status: $status, head_sha: $head,
+                        conclusion: (if $conclusion == "-" then null else $conclusion end),
+                        run_attempt: 1, run_started_at: "2026-10-19T07:30:35Z"}]
+    | .total_count = (.workflow_runs | length)' "$case_dir/github-actions/runs.json" \
+    > "$case_dir/github-actions/runs.next"
+  mv "$case_dir/github-actions/runs.next" "$case_dir/github-actions/runs.json"
+}
+
+add_commit_status() {
+  local case_dir=$1 context=$2 state=$3
+  jq -c --arg c "$context" --arg s "$state" '.statuses += [{context: $c, state: $s}]' \
+    "$case_dir/github-actions/status.json" > "$case_dir/github-actions/status.next"
+  mv "$case_dir/github-actions/status.next" "$case_dir/github-actions/status.json"
+}
+
+test_actions_green_merges() {
+  local case_dir head
+  head=c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1
+  case_dir=$(make_case actions-green)
+  add_gh_mocks "$case_dir" "$head"
+  use_actions_results "$case_dir" "$head"
+  add_actions_run "$case_dir" "$head" 100 7 ci completed failure test:completed:failure
+  add_actions_run "$case_dir" "$head" 101 7 ci completed success test:completed:success
+  add_actions_run "$case_dir" "$head" 102 8 lint completed success lint:completed:success docs:completed:skipped
+  add_commit_status "$case_dir" license/cla success
+  write_github_required "$case_dir" classic:test ruleset:license/cla
+  run_required_case "$case_dir" 120
+  expect_code 0 "$RC" "actions-green: green Actions jobs and statuses must merge: $(cat "$case_dir/stderr")"
+  assert_grep "green at head $head, judged from GitHub Actions runs and commit statuses" \
+    "$case_dir/stderr" "actions-green: the merge output did not say where the results came from"
+  assert_grep "api --paginate repos/example/repo/actions/runs?head_sha=$head&per_page=100" "$case_dir/gh.log" \
+    "actions-green: the runs were not read at the live head"
+  ! grep -q 'actions/runs/100/jobs' "$case_dir/gh.log" \
+    || fail "actions-green: a superseded run of the same workflow was read"
+  assert_logged_gh_merge "$case_dir" 120 example/repo --squash
+  pass "fm-pr-merge merges on green GitHub Actions jobs and commit statuses at the live head"
+}
+
+test_actions_failed_job_refuses() {
+  local case_dir head
+  head=c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2
+  case_dir=$(make_case actions-failed)
+  add_gh_mocks "$case_dir" "$head"
+  use_actions_results "$case_dir" "$head"
+  add_actions_run "$case_dir" "$head" 201 7 ci completed failure build:completed:success test:completed:failure
+  run_required_case "$case_dir" 121
+  expect_code 1 "$RC" "actions-failed: a failed job must refuse"
+  assert_grep "check 'test' is not green" "$case_dir/stderr" "actions-failed: the failed job was not named"
+  ! grep -q "check 'build' is not green" "$case_dir/stderr" \
+    || fail "actions-failed: a green job was reported red"
+  ! grep -q '^pr merge ' "$case_dir/gh.log" || fail "actions-failed: a refused merge reached the forge"
+  pass "fm-pr-merge refuses a failed GitHub Actions job"
+}
+
+test_actions_queued_run_refuses() {
+  local case_dir head
+  head=c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3
+  case_dir=$(make_case actions-queued)
+  add_gh_mocks "$case_dir" "$head"
+  use_actions_results "$case_dir" "$head"
+  add_actions_run "$case_dir" "$head" 301 7 ci completed success test:completed:success
+  add_actions_run "$case_dir" "$head" 302 9 deploy-preview queued -
+  run_required_case "$case_dir" 122
+  expect_code 1 "$RC" "actions-queued: a queued run must refuse"
+  assert_grep "check 'deploy-preview' is not green" "$case_dir/stderr" \
+    "actions-queued: the queued run was not named"
+  ! grep -q '^pr merge ' "$case_dir/gh.log" || fail "actions-queued: a refused merge reached the forge"
+  pass "fm-pr-merge refuses a queued GitHub Actions run"
+}
+
+test_actions_no_runs_refuses() {
+  local case_dir head
+  head=c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4
+  case_dir=$(make_case actions-empty)
+  add_gh_mocks "$case_dir" "$head"
+  use_actions_results "$case_dir" "$head"
+  run_required_case "$case_dir" 123
+  expect_code 1 "$RC" "actions-empty: a head with no run and no status must refuse"
+  assert_grep "no GitHub Actions run or commit status has reported at head $head" "$case_dir/stderr" \
+    "actions-empty: the empty head was not reported"
+  ! grep -q '^pr merge ' "$case_dir/gh.log" || fail "actions-empty: a refused merge reached the forge"
+  pass "fm-pr-merge refuses a head with no GitHub Actions run or commit status"
+}
+
+test_actions_required_check_missing_refuses() {
+  local case_dir head
+  head=c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5
+  case_dir=$(make_case actions-required)
+  add_gh_mocks "$case_dir" "$head"
+  use_actions_results "$case_dir" "$head"
+  add_actions_run "$case_dir" "$head" 501 7 ci completed success test:completed:success
+  write_github_required "$case_dir" classic:test ruleset:lint
+  run_required_case "$case_dir" 124
+  expect_code 1 "$RC" "actions-required: a required check missing from the jobs must refuse"
+  assert_grep "required check 'lint' has not reported at head $head" "$case_dir/stderr" \
+    "actions-required: the missing required check was not named"
+  ! grep -q "required check 'test'" "$case_dir/stderr" \
+    || fail "actions-required: a reported job was called missing"
+  pass "fm-pr-merge refuses a required check absent from the GitHub Actions jobs"
+}
+
+test_unreadable_actions_results_refuse() {
+  local case_dir head part
+  head=c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7
+  for part in runs jobs status stale-job; do
+    case_dir=$(make_case "actions-unreadable-$part")
+    add_gh_mocks "$case_dir" "$head"
+    use_actions_results "$case_dir" "$head"
+    add_actions_run "$case_dir" "$head" 701 7 ci completed success test:completed:success
+    case "$part" in
+      runs) rm "$case_dir/github-actions/runs.json" ;;
+      jobs) rm "$case_dir/github-actions/jobs-701.json" ;;
+      status) rm "$case_dir/github-actions/status.json" ;;
+      stale-job)
+        jq -c '.jobs[0].head_sha = "dddddddddddddddddddddddddddddddddddddddd"' \
+          "$case_dir/github-actions/jobs-701.json" > "$case_dir/github-actions/jobs.next"
+        mv "$case_dir/github-actions/jobs.next" "$case_dir/github-actions/jobs-701.json"
+        ;;
+    esac
+    run_required_case "$case_dir" 126
+    expect_code 1 "$RC" "actions-unreadable-$part: an unreadable GitHub Actions read must refuse"
+    assert_grep "could not read the GitHub Actions results at head $head before merging" "$case_dir/stderr" \
+      "actions-unreadable-$part: the unreadable read was not reported"
+    ! grep -q '^pr merge ' "$case_dir/gh.log" || fail "actions-unreadable-$part: a refused merge reached the forge"
+  done
+  pass "fm-pr-merge refuses when any GitHub Actions or commit status read at the head is unreadable"
+}
+
 test_required_producer_identity() {
-  local case_dir head kind variant expected app
+  local case_dir head kind variant expected bound
   head=a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
   for kind in classic ruleset; do
-    for variant in wrong correct unreadable malformed stale waived; do
+    for variant in wrong correct unreadable malformed waived; do
       case_dir=$(make_case "required-producer-$kind-$variant")
       add_gh_mocks "$case_dir" "$head"
       write_github_required "$case_dir" "$kind:ci"
+      bound=15368
+      case "$variant" in
+        wrong|waived) bound=42 ;;
+        unreadable) : > "$case_dir/github-actions-app-fail" ;;
+        malformed) printf '{}' > "$case_dir/github-actions-app.json" ;;
+      esac
       if [ "$kind" = classic ]; then
-        jq '.protection.required_status_checks.checks[0].app_id = 15368' \
+        jq --argjson app "$bound" '.protection.required_status_checks.checks[0].app_id = $app' \
           "$case_dir/github-branch.json" > "$case_dir/updated.json"
         mv "$case_dir/updated.json" "$case_dir/github-branch.json"
       else
-        jq '.[1].parameters.required_status_checks[0].integration_id = 15368' \
+        jq --argjson app "$bound" '.[1].parameters.required_status_checks[0].integration_id = $app' \
           "$case_dir/github-required-rules.json" > "$case_dir/updated.json"
         mv "$case_dir/updated.json" "$case_dir/github-required-rules.json"
       fi
-      app=42
-      [ "$variant" != correct ] || app=15368
-      printf '{"check_runs":[{"name":"ci","app":{"id":%s},"head_sha":"%s"}]}\n' \
-        "$app" "$head" > "$case_dir/github-runs.json"
-      case "$variant" in
-        unreadable) rm "$case_dir/github-runs.json" ;;
-        malformed) printf '{}' > "$case_dir/github-runs.json" ;;
-        stale) printf '{"check_runs":[{"name":"ci","app":{"id":15368},"head_sha":"bbbb"}]}' > "$case_dir/github-runs.json" ;;
-      esac
       expected=1
       if [ "$variant" = waived ]; then
         run_required_case "$case_dir" 110 --attended-override --allow-missing ci -- --admin
@@ -4075,12 +4274,12 @@ test_required_producer_identity() {
         assert_grep 'pr merge' "$case_dir/gh.log" "accepted producer did not merge"
       fi
       case "$variant" in
-        unreadable|malformed|stale)
+        unreadable|malformed)
           assert_grep 'required check producers at head' "$case_dir/stderr" "producer read error not reported" ;;
       esac
     done
   done
-  pass "fm-pr-merge enforces required producer identity and named waivers"
+  pass "fm-pr-merge satisfies an app-bound requirement from a job only when GitHub Actions is the app"
 }
 
 # A commit status carries no app id to compare, so an app-bound required context
@@ -4108,8 +4307,6 @@ test_app_bound_required_status_context_matches_by_name() {
           "$case_dir/github-required-rules.json" > "$case_dir/updated.json"
         mv "$case_dir/updated.json" "$case_dir/github-required-rules.json"
       fi
-      printf '{"check_runs":[{"name":"ci","app":{"id":42},"head_sha":"%s"}]}\n' \
-        "$head" > "$case_dir/github-runs.json"
       run_required_case "$case_dir" 111
       if [ "$variant" = reported ]; then
         expect_code 0 "$RC" "app-status-$kind-reported: a green app-bound status must merge: $(cat "$case_dir/stderr")"
@@ -4615,6 +4812,12 @@ test_allow_missing_follows_the_allow_red_rules
 
 test_required_producer_identity
 test_app_bound_required_status_context_matches_by_name
+test_actions_green_merges
+test_actions_failed_job_refuses
+test_actions_queued_run_refuses
+test_actions_no_runs_refuses
+test_actions_required_check_missing_refuses
+test_unreadable_actions_results_refuse
 test_required_partial_reads_report_all_failures
 test_allow_red_refused_on_forgejo
 test_allow_missing_refused_on_forgejo

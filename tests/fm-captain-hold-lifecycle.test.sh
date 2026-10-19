@@ -114,8 +114,8 @@ printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
-      *statusCheckRollup*)
-        printf '%s\n' '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"1111111111111111111111111111111111111111","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}'
+      *baseRefName*)
+        printf '%s\n' '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"1111111111111111111111111111111111111111","baseRefName":"main"}'
         ;;
       *headRefOid*) printf '%s\n' 1111111111111111111111111111111111111111 ;;
     esac
@@ -127,6 +127,15 @@ case "${1:-} ${2:-}" in
   "api --paginate")
     case " $* " in
       *merge_queue*) ;;
+      *"/actions/runs?head_sha="*)
+        printf '%s\n' '{"workflow_runs":[{"id":1,"workflow_id":1,"name":"ci","status":"completed","conclusion":"success","head_sha":"1111111111111111111111111111111111111111"}]}'
+        ;;
+      *"/actions/runs/1/jobs"*)
+        printf '%s\n' '{"jobs":[{"name":"ci","status":"completed","conclusion":"success","head_sha":"1111111111111111111111111111111111111111"}]}'
+        ;;
+      *"/commits/1111111111111111111111111111111111111111/status?"*)
+        printf '%s\n' '{"sha":"1111111111111111111111111111111111111111","statuses":[]}'
+        ;;
       *) printf '%s\n' '[]' ;;
     esac
     ;;

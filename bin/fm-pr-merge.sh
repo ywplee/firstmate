@@ -17,10 +17,13 @@
 # A GitHub merge is refused unless every pre-merge condition holds, each read
 # live at merge time rather than taken from recorded metadata: the pull request
 # is open, not a draft, mergeable, free of conflicts, every unwaived check
-# is green at the exact current head commit, where github_checks_not_green below
-# owns what makes a check green and judges each one by its current run, and
-# every unwaived check the forge requires for the base branch has reported at
-# that head. When mergeable is the only failing condition and reads UNKNOWN,
+# is green at the exact current head commit, and every unwaived check the forge
+# requires for the base branch has reported at that head. github_read_checks
+# below owns how checks are read, from GitHub Actions and commit statuses because
+# GitHub check data is not readable with fine-grained personal access tokens,
+# and the verified line says so; github_checks_not_green below owns what makes a
+# check green and judges each one by its current run. A head with no run and no
+# status refuses. When mergeable is the only failing condition and reads UNKNOWN,
 # meaning GitHub has not finished recomputing it, the caller re-reads and
 # re-checks every condition after a short bounded wait instead of refusing;
 # once that bound is spent it reports mergeability still pending rather than
@@ -28,11 +31,12 @@
 # A required check that never reported is absent from the checks
 # list rather than red, so github_read_required_contexts below reads the
 # required set from classic branch protection and active rulesets. Check-run
-# requirements retain their producer app binding: a same-named check run from another app cannot
-# satisfy them, and a duplicate name-only entry cannot weaken that binding.
-# Unbound requirements match by name. A bound requirement reported as a check
-# run also needs a matching producer in the check-runs read at the verified
-# head, while one reported as a commit status matches by name, because the
+# requirements retain their producer app binding: a same-named job cannot
+# satisfy one bound to an app other than GitHub Actions, and a duplicate
+# name-only entry cannot weaken that binding. Unbound requirements match by
+# name. A bound requirement met by a job also needs GitHub Actions' own app id,
+# read live, to equal the bound one, while one reported as a commit status
+# matches by name, because the
 # status carries no app id to compare. Status-creator app binding is not verified
 # here, so an attended --attended-override -- --admin merge can bypass that
 # protection without a missing-check waiver when a same-named status reported.
@@ -839,17 +843,18 @@ forgejo_default_merge_style() {
   esac
 }
 
-# Every GitHub check that is not green in the given live pull-request JSON, one
-# name per line. An entry is green when it is a status context whose state is
-# SUCCESS, or a check run that completed with SUCCESS, NEUTRAL, or SKIPPED (so
-# a pending check is not green either). Exits nonzero when the rollup cannot be
-# read, so a malformed answer is a failed read and never an empty red set.
+# Every GitHub check that is not green in the given checks list, read by
+# github_read_checks, one name per line. An entry is green when it is a status
+# context whose state is SUCCESS, or a check run that completed with SUCCESS,
+# NEUTRAL, or SKIPPED (so a pending check is not green either). Exits nonzero
+# when the list cannot be read, so a malformed answer is a failed read and never
+# an empty red set.
 #
-# The rollup can hold several runs of one check name at the same head, because
+# The list can hold several runs of one check name at the same head, because
 # GitHub cancels a pull request's in-flight run when the base branch advances
-# and re-triggers it; the cancelled run stays in the rollup beside the passing
-# re-run. A check is therefore judged by its current run rather than by any run
-# that a later one superseded, which is what makes this agree with GitHub's own
+# and re-triggers it; the cancelled run stays beside the passing re-run. A check
+# is therefore judged by its current run rather than by any run that a later one
+# superseded, which is what makes this agree with GitHub's own
 # CLEAN mergeStateStatus instead of refusing a pull request GitHub considers
 # mergeable.
 #
@@ -870,9 +875,8 @@ github_checks_not_green() {
     def settled_at:
       if type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
       then . else null end;
-    if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
-    | [ .statusCheckRollup
-        | to_entries[]
+    if type != "array" then error("no checks") else . end
+    | [ to_entries[]
         | .key as $i
         | .value
         | if .__typename == "CheckRun" then
@@ -984,8 +988,8 @@ github_read_required_contexts() {
 github_required_checks_missing() {
   local json=$1 required=$2 producers=$3
   printf '%s' "$json" | jq -r --argjson required "$required" --argjson producers "$producers" '
-    if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
-    | .statusCheckRollup as $reported
+    if type != "array" then error("no checks") else . end
+    | . as $reported
     | $required
     | map(. as $requirement
       | select(any($reported[];
@@ -1001,16 +1005,70 @@ github_required_checks_missing() {
   ' 2>/dev/null || return 1
 }
 
+# The checks at one head commit, read from GitHub Actions and commit statuses
+# rather than GitHub check runs, whose data GitHub does not expose to a
+# fine-grained personal access token. Each workflow's latest run contributes its
+# latest attempt's jobs as check runs named by job name, so
+# github_checks_not_green and github_required_checks_missing judge them by the
+# same rules as any check run. A run not yet completed, or completed with no
+# job, contributes itself under its workflow name so it cannot read as green.
+# Sets FM_PR_GITHUB_CHECKS to that list and FM_PR_GITHUB_JOB_NAMES to the job
+# names; any unreadable or mismatched read fails.
+FM_PR_GITHUB_CHECKS=
+FM_PR_GITHUB_JOB_NAMES=
+github_read_checks() {
+  local head=$1 runs_json runs run_id jobs_json run_entries entries='' statuses_json statuses
+  FM_PR_GITHUB_CHECKS=
+  FM_PR_GITHUB_JOB_NAMES=
+  runs_json=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/actions/runs?head_sha=$head&per_page=100" 2>/dev/null) \
+    && [ -n "$runs_json" ] || return 1
+  runs=$(printf '%s' "$runs_json" | jq -c -s --arg head "$head" '
+    [ .[] | if (.workflow_runs | type) == "array" then .workflow_runs[] else error("invalid runs") end
+      | if (.id | type) == "number" and (.workflow_id | type) == "number"
+           and (.status | type) == "string" and .head_sha == $head
+        then . else error("invalid run") end ]
+    | group_by(.workflow_id) | map(max_by(.id))' 2>/dev/null) || return 1
+  while IFS= read -r run_id; do
+    [ -n "$run_id" ] || continue
+    jobs_json=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/actions/runs/$run_id/jobs?per_page=100" 2>/dev/null) \
+      && [ -n "$jobs_json" ] || return 1
+    run_entries=$(printf '%s' "$jobs_json" | jq -c -s --arg head "$head" --argjson run_id "$run_id" --argjson runs "$runs" '
+      def check_run(name; status; conclusion; started):
+        {__typename: "CheckRun", name: name, status: (status | ascii_upcase),
+         conclusion: (if conclusion == null then null else (conclusion | ascii_upcase) end),
+         startedAt: started};
+      ($runs[] | select(.id == $run_id)) as $run
+      | [ .[] | if (.jobs | type) == "array" then .jobs[] else error("invalid jobs") end
+          | if (.name | type) == "string" and (.status | type) == "string" and .head_sha == $head
+            then check_run(.name; .status; .conclusion; .started_at) else error("invalid job") end ]
+      | if $run.status != "completed" or length == 0 then
+          . + [check_run(($run.name // "") | tostring; $run.status; $run.conclusion; $run.run_started_at)]
+        else . end' 2>/dev/null) || return 1
+    entries="$entries$run_entries"
+  done <<EOF
+$(printf '%s' "$runs" | jq -r '.[].id')
+EOF
+  statuses_json=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/commits/$head/status?per_page=100" 2>/dev/null) \
+    && [ -n "$statuses_json" ] || return 1
+  statuses=$(printf '%s' "$statuses_json" | jq -c -s --arg head "$head" '
+    [ .[] | if .sha == $head and (.statuses | type) == "array" then .statuses[] else error("invalid status") end
+      | if (.context | type) == "string" and (.state | type) == "string"
+        then {__typename: "StatusContext", context, state: (.state | ascii_upcase)}
+        else error("invalid status") end ]' 2>/dev/null) || return 1
+  FM_PR_GITHUB_CHECKS=$(printf '%s\n%s\n' "$entries" "$statuses" | jq -c -s 'add // []') || return 1
+  FM_PR_GITHUB_JOB_NAMES=$(printf '%s' "$FM_PR_GITHUB_CHECKS" | jq -c '[.[] | select(.__typename == "CheckRun") | .name]')
+}
+
 # Pre-merge conditions from a live PR view, base requirements, and head producers.
 # Sets FM_PR_MERGE_HEAD to the verified head on success. Returns 3, rather than
 # the usual 1, when mergeable=UNKNOWN is the only failing condition, so the
 # caller can retry a still-computing mergeability read instead of refusing.
 github_verify_mergeable() {
-  local json fields line red name covered missing unreported producers runs
+  local json fields line red name covered missing unreported producers actions_app
   local total=0 named=0 refusals='' mergeable_refusal=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
 
-  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup 2>/dev/null) \
+  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName 2>/dev/null) \
     || [ -z "$json" ]; then
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
@@ -1052,8 +1110,8 @@ FIELDS
     echo "error: could not read the GitHub pull request head commit before merging" >&2
     return 1
   fi
-  if ! red=$(github_checks_not_green "$json"); then
-    echo "error: could not read the GitHub pull request state before merging" >&2
+  if ! github_read_checks "$live_head" || ! red=$(github_checks_not_green "$FM_PR_GITHUB_CHECKS"); then
+    echo "error: could not read the GitHub Actions results at head $live_head before merging" >&2
     return 1
   fi
 
@@ -1073,6 +1131,10 @@ FIELDS
   [ "$merge_state" != DIRTY ] \
     || refusals="$refusals  - mergeStateStatus is DIRTY (conflicts)
 "
+  if [ "$FM_PR_GITHUB_CHECKS" = '[]' ]; then
+    refusals="$refusals  - no GitHub Actions run or commit status has reported at head $live_head
+"
+  fi
 
   uncovered=''
   while IFS= read -r name; do
@@ -1103,19 +1165,17 @@ EOF
   fi
   producers='[]'
   if printf '%s' "$FM_PR_GITHUB_REQUIRED" | jq -e 'any(.[]; .app_id != null)' >/dev/null; then
-    if ! runs=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/commits/$live_head/check-runs" 2>/dev/null) \
-      || [ -z "$runs" ] \
-      || ! producers=$(printf '%s' "$runs" | jq -sc --arg head "$live_head" '
-        [ .[] | if (.check_runs | type) == "array" then .check_runs[] else error("invalid check runs") end
-          | if (.name | type) == "string" and (.app.id | type) == "number" and .head_sha == $head
-            then . else error("invalid check producer") end ]' 2>/dev/null); then
+    if ! actions_app=$(gh api apps/github-actions 2>/dev/null) \
+      || ! producers=$(printf '%s' "$actions_app" | jq -c --argjson jobs "$FM_PR_GITHUB_JOB_NAMES" '
+        if (.id | type) == "number" then .id as $id | [$jobs[] | {name: ., app: {id: $id}}]
+        else error("invalid app") end' 2>/dev/null); then
       producers='[]'
       refusals="$refusals  - required check producers at head $live_head could not be read
 "
     fi
   fi
-  if ! missing=$(github_required_checks_missing "$json" "$FM_PR_GITHUB_REQUIRED" "$producers"); then
-    refusals="$refusals  - the GitHub pull request check rollup could not be read
+  if ! missing=$(github_required_checks_missing "$FM_PR_GITHUB_CHECKS" "$FM_PR_GITHUB_REQUIRED" "$producers"); then
+    refusals="$refusals  - the GitHub Actions results could not be read
 "
   else
     while IFS= read -r name; do
@@ -1143,7 +1203,7 @@ EOF
     [ -z "$unreported" ] || printf 'error: these required checks have not reported: %s\n' "$unreported" >&2
     return 1
   fi
-  printf 'verified: %s is open and mergeable, with every unwaived required check reported and every unwaived check green at head %s\n' \
+  printf 'verified: %s is open and mergeable, with every unwaived required check reported and every unwaived check green at head %s, judged from GitHub Actions runs and commit statuses\n' \
     "$URL" "$live_head" >&2
   FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITHUB_BASE=$base
