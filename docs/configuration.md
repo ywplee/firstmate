@@ -606,6 +606,16 @@ Secondmate homes inherit the primary's resolved role, never its raw file: a prim
 In a secondmate home the file is honored only while the inheritance receipt `config/.fm-inherit-firstmate-role.generation` proves the exact bytes the primary last published (`bin/fm-config-inherit-lib.sh`); a role file with no matching receipt or a stale grant authorizes nothing.
 The receipt prevents accidental publication through supported paths; it proves consistency, not provenance, and is not a security boundary against a process that deliberately forges local records.
 
+## Fork sync (.github/workflows/fork-sync.yml)
+
+A fork of Firstmate can stay current with its author's repository without a manual step.
+The tracked workflow `fork-sync.yml` runs daily and on demand, and only when the repository is `ywplee/firstmate`; edit that guard to adopt it on another fork.
+It calls GitHub's [merge-upstream API](https://docs.github.com/en/rest/branches/branches#sync-a-fork-branch-with-the-upstream-repository) for `main`, which fast-forwards when the fork has no extra commits and otherwise adds a merge commit, so history is never rewritten and `/updatefirstmate` keeps fast-forwarding.
+When the fork's commits conflict with upstream (409), or GitHub refuses the sync (422), `main` is left untouched and one `fork-sync-failed` issue is opened or updated with what to do; it closes itself after the next successful sync.
+The default `GITHUB_TOKEN` cannot push upstream changes that touch `.github/workflows`, so that case also lands in the issue.
+To remove it, add an optional repository secret `FORK_SYNC_TOKEN`: a fine-grained token scoped to this fork only, with Contents and Workflows read and write.
+The secret is not required.
+
 ## Waiting worker spends no turns (config/wait-no-turns)
 
 The optional local, gitignored `config/wait-no-turns` presence flag opts this home into keeping a waiting worker from spending turns until it is answered.

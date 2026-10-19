@@ -1,0 +1,86 @@
+name: Fork sync
+
+on:
+  schedule:
+    - cron: "37 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: fork-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync main from upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.repository == 'ywplee/firstmate'
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+      ISSUE_LABEL: fork-sync-failed
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Merge upstream main into fork main
+        id: sync
+        run: |
+          if out=$(gh api --method POST "repos/${GH_REPO}/merge-upstream" -f branch=main 2>&1); then
+            printf '%s\n' "$out"
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' "$out"
+            {
+              echo "ok=false"
+              echo "error<<EOF_ERROR"
+              printf '%s\n' "$out"
+              echo "EOF_ERROR"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Close the failure issue after a successful sync
+        if: steps.sync.outputs.ok == 'true'
+        run: |
+          number=$(gh issue list --label "$ISSUE_LABEL" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue close "$number" --comment "Sync succeeded in $RUN_URL, closing."
+          fi
+
+      - name: Open or update the failure issue
+        if: steps.sync.outputs.ok != 'true'
+        env:
+          SYNC_ERROR: ${{ steps.sync.outputs.error }}
+        run: |
+          gh label create "$ISSUE_LABEL" --color B60205 \
+            --description "Daily sync from kunchenguid/firstmate failed" 2>/dev/null || true
+          body=$(cat <<EOF
+          The daily sync of \`main\` from kunchenguid/firstmate failed, so this fork's \`main\` was left untouched.
+
+          Run: $RUN_URL
+
+          GitHub said:
+
+          \`\`\`
+          $SYNC_ERROR
+          \`\`\`
+
+          What to do:
+
+          - **Merge conflict (409):** upstream and this fork changed the same lines. On the Mac, merge \`upstream/main\` into local \`main\`, resolve the conflict, and push to this fork.
+          - **Could not sync (422) mentioning workflow files:** the default \`GITHUB_TOKEN\` cannot push upstream changes that touch \`.github/workflows\`. Sync once by hand (Sync fork button, or merge locally and push), or add the optional \`FORK_SYNC_TOKEN\` secret described in docs/configuration.md so this job can do it.
+          - Re-run the workflow from the Actions tab after fixing. This issue closes itself on the next successful sync.
+          EOF
+          )
+          number=$(gh issue list --label "$ISSUE_LABEL" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "Fork sync from upstream failed" --label "$ISSUE_LABEL" --body "$body"
+          fi
+
+      - name: Fail the run when the sync failed
+        if: steps.sync.outputs.ok != 'true'
+        run: exit 1
