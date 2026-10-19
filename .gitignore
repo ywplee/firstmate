@@ -10,6 +10,7 @@ scratchpad*
 __pycache__/
 *.pyc
 .env
+.claude/settings.local.json
 config/
 
 .tools/
