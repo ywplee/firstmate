@@ -197,6 +197,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-github-checks-lib.sh
+. "$SCRIPT_DIR/fm-github-checks-lib.sh"
 # shellcheck source=bin/fm-merge-outcome-lib.sh
 . "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
 # shellcheck source=bin/fm-merge-authority-lib.sh
@@ -1005,60 +1007,6 @@ github_required_checks_missing() {
   ' 2>/dev/null || return 1
 }
 
-# The checks at one head commit, read from GitHub Actions and commit statuses
-# rather than GitHub check runs, whose data GitHub does not expose to a
-# fine-grained personal access token. Each workflow's latest run contributes its
-# latest attempt's jobs as check runs named by job name, so
-# github_checks_not_green and github_required_checks_missing judge them by the
-# same rules as any check run. A run not yet completed, or completed with no
-# job, contributes itself under its workflow name so it cannot read as green.
-# Sets FM_PR_GITHUB_CHECKS to that list and FM_PR_GITHUB_JOB_NAMES to the job
-# names; any unreadable or mismatched read fails.
-FM_PR_GITHUB_CHECKS=
-FM_PR_GITHUB_JOB_NAMES=
-github_read_checks() {
-  local head=$1 runs_json runs run_id jobs_json run_entries entries='' statuses_json statuses
-  FM_PR_GITHUB_CHECKS=
-  FM_PR_GITHUB_JOB_NAMES=
-  runs_json=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/actions/runs?head_sha=$head&per_page=100" 2>/dev/null) \
-    && [ -n "$runs_json" ] || return 1
-  runs=$(printf '%s' "$runs_json" | jq -c -s --arg head "$head" '
-    [ .[] | if (.workflow_runs | type) == "array" then .workflow_runs[] else error("invalid runs") end
-      | if (.id | type) == "number" and (.workflow_id | type) == "number"
-           and (.status | type) == "string" and .head_sha == $head
-        then . else error("invalid run") end ]
-    | group_by(.workflow_id) | map(max_by(.id))' 2>/dev/null) || return 1
-  while IFS= read -r run_id; do
-    [ -n "$run_id" ] || continue
-    jobs_json=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/actions/runs/$run_id/jobs?per_page=100" 2>/dev/null) \
-      && [ -n "$jobs_json" ] || return 1
-    run_entries=$(printf '%s' "$jobs_json" | jq -c -s --arg head "$head" --argjson run_id "$run_id" --argjson runs "$runs" '
-      def check_run(name; status; conclusion; started):
-        {__typename: "CheckRun", name: name, status: (status | ascii_upcase),
-         conclusion: (if conclusion == null then null else (conclusion | ascii_upcase) end),
-         startedAt: started};
-      ($runs[] | select(.id == $run_id)) as $run
-      | [ .[] | if (.jobs | type) == "array" then .jobs[] else error("invalid jobs") end
-          | if (.name | type) == "string" and (.status | type) == "string" and .head_sha == $head
-            then check_run(.name; .status; .conclusion; .started_at) else error("invalid job") end ]
-      | if $run.status != "completed" or length == 0 then
-          . + [check_run(($run.name // "") | tostring; $run.status; $run.conclusion; $run.run_started_at)]
-        else . end' 2>/dev/null) || return 1
-    entries="$entries$run_entries"
-  done <<EOF
-$(printf '%s' "$runs" | jq -r '.[].id')
-EOF
-  statuses_json=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/commits/$head/status?per_page=100" 2>/dev/null) \
-    && [ -n "$statuses_json" ] || return 1
-  statuses=$(printf '%s' "$statuses_json" | jq -c -s --arg head "$head" '
-    [ .[] | if .sha == $head and (.statuses | type) == "array" then .statuses[] else error("invalid status") end
-      | if (.context | type) == "string" and (.state | type) == "string"
-        then {__typename: "StatusContext", context, state: (.state | ascii_upcase)}
-        else error("invalid status") end ]' 2>/dev/null) || return 1
-  FM_PR_GITHUB_CHECKS=$(printf '%s\n%s\n' "$entries" "$statuses" | jq -c -s 'add // []') || return 1
-  FM_PR_GITHUB_JOB_NAMES=$(printf '%s' "$FM_PR_GITHUB_CHECKS" | jq -c '[.[] | select(.__typename == "CheckRun") | .name]')
-}
-
 # Pre-merge conditions from a live PR view, base requirements, and head producers.
 # Sets FM_PR_MERGE_HEAD to the verified head on success. Returns 3, rather than
 # the usual 1, when mergeable=UNKNOWN is the only failing condition, so the
@@ -1110,7 +1058,7 @@ FIELDS
     echo "error: could not read the GitHub pull request head commit before merging" >&2
     return 1
   fi
-  if ! github_read_checks "$live_head" || ! red=$(github_checks_not_green "$FM_PR_GITHUB_CHECKS"); then
+  if ! github_read_checks "$PR_OWNER" "$PR_REPO" "$live_head" || ! red=$(github_checks_not_green "$FM_PR_GITHUB_CHECKS"); then
     echo "error: could not read the GitHub Actions results at head $live_head before merging" >&2
     return 1
   fi

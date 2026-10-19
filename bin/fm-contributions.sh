@@ -118,6 +118,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 export FM_HOME FM_STATE_OVERRIDE="$STATE"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-github-checks-lib.sh
+. "$SCRIPT_DIR/fm-github-checks-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-path-lib.sh
@@ -337,6 +339,11 @@ wait_forges() { # background forge pids from one independent read wave
   return "$rc"
 }
 
+read_actions_checks() { # owner/repo head output-file
+  FORGE_ERR="$TMP/checks.err" FM_GITHUB_CHECKS_GH=forge github_read_checks "${1%%/*}" "${1#*/}" "$2" || return 1
+  printf '%s\n' "$FM_PR_GITHUB_CHECKS" > "$3"
+}
+
 observe() { # canonical GitHub URL -> normalized JSON
   local url=$1 part number kind endpoint head after label
   case "$url" in https://github.com/*) ;; *) return 1 ;; esac
@@ -356,13 +363,11 @@ observe() { # canonical GitHub URL -> normalized JSON
     local reviews_pid=$!
     FORGE_ERR="$TMP/inline.err" forge api "$endpoint/comments?per_page=100" --paginate --slurp > "$TMP/inline.json" &
     local inline_pid=$!
-    FORGE_ERR="$TMP/checks.err" forge api "repos/$part/commits/$head/check-runs?filter=all&per_page=100" --paginate --slurp > "$TMP/checks.json" &
+    read_actions_checks "$part" "$head" "$TMP/checks.json" &
     local checks_pid=$!
-    FORGE_ERR="$TMP/statuses.err" forge api "repos/$part/commits/$head/statuses?per_page=100" --paginate --slurp > "$TMP/statuses.json" &
-    local statuses_pid=$!
     FORGE_ERR="$TMP/repo.err" forge api "repos/$part" > "$TMP/repo.json" &
     local repo_pid=$!
-    wait_forges "$comments_pid" "$reviews_pid" "$inline_pid" "$checks_pid" "$statuses_pid" "$repo_pid" || return 1
+    wait_forges "$comments_pid" "$reviews_pid" "$inline_pid" "$checks_pid" "$repo_pid" || return 1
     jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null \
       || unobserved 'comment pages returned an unexpected shape' || return 1
     FORGE_ERR="$TMP/head.err" forge pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return 1
@@ -371,7 +376,7 @@ observe() { # canonical GitHub URL -> normalized JSON
     [ "$head" = "$after" ] || unobserved 'head changed during observation' || return 1
     jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
       --slurpfile reviews "$TMP/reviews.json" --slurpfile inline "$TMP/inline.json" --slurpfile after "$TMP/after.json" --slurpfile checks "$TMP/checks.json" \
-      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" '
+      --slurpfile repo "$TMP/repo.json" '
       $core[0] as $c
       | ($reviews[0] | add // []) as $reviews
       | {head:$c.head.sha,state:(if $c.merged_at != null then "merged" else $c.state end),
@@ -379,10 +384,16 @@ observe() { # canonical GitHub URL -> normalized JSON
           can_merge:($repo[0].permissions.push // false),
           review_decision:($after[0].reviewDecision // ""),
           reviews:($reviews | map({id,state,submitted_at,commit_id,user:{login:.user.login}})),
-          checks:([ $checks[0][] | .check_runs[] | {name,id,status,conclusion,started_at} ]
-            + [ $statuses[0][] | .[] | {name:.context,id,started_at:.created_at,
-              status:(if .state == "pending" then "in_progress" else "completed" end),
-              conclusion:(if .state == "pending" then null else .state end)} ]),
+          checks:($checks[0] | map(
+            if .__typename == "CheckRun" then
+              {name,id,status:(.status | ascii_downcase),
+               conclusion:(if .conclusion == null then null else (.conclusion | ascii_downcase) end),
+               started_at:.startedAt}
+            else
+              {name:.context,id,started_at:.startedAt,
+               status:(if .state == "PENDING" then "in_progress" else "completed" end),
+               conclusion:(if .state == "PENDING" then null else (.state | ascii_downcase) end)}
+            end)),
           events:((($comments[0] | add // [] | map(. + {_signal:"comment"})) + ($reviews | map(. + {_signal:"review"})) + ($inline[0] | add // [] | map(. + {_signal:"review-comment"})))
             | map(select(.user.login != $c.user.login and (.author_association | IN("OWNER","MEMBER","COLLABORATOR")))
               | {token:((._signal + ":") + (.id|tostring) + ":" + (.updated_at // .submitted_at // "") + ":" + (.state // "")),
