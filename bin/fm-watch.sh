@@ -224,6 +224,7 @@ WATCH_HOME_EXISTED=0
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# shellcheck source=bin/fm-bare-guard-lib.sh
 . "$SCRIPT_DIR/fm-bare-guard-lib.sh"
 # Parent-owned secondmate missed-report guards: durable pending-reply
 # expectations created by fm-send on marked secondmate requests. The tick is

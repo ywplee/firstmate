@@ -297,6 +297,7 @@ fm_session_lock_identity_matches() {
   fi
   [ -n "$recorded" ] || return 0
   if ! declare -F fm_pid_identity >/dev/null; then
+    # shellcheck source=bin/fm-wake-lib.sh
     . "${BASH_SOURCE[0]%/*}/fm-wake-lib.sh"
   fi
   current=$(fm_pid_identity "$pid") || return 1

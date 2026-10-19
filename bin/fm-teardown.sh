@@ -3438,6 +3438,7 @@ require_owned_task_worktree_slot || exit 1
 if [ "$STOP" = 1 ]; then
   [ "$KIND" = secondmate ] || { echo "error: --stop applies only to a secondmate" >&2; exit 2; }
   [ -z "$(fm_meta_get "$META" remote_host)" ] || { echo "error: --stop requires a local secondmate; remote lifecycle stays on its owning host" >&2; exit 1; }
+  # shellcheck source=bin/fm-secondmate-liveness-lib.sh
   . "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   if fm_secondmate_domain_has_work "$STATE" "$ID" "$HOME_PATH"; then

@@ -141,6 +141,7 @@ fm_secondmate_domain_has_work() {
   for child_meta in "$home"/state/*.meta; do
     [ -e "$child_meta" ] && return 0
   done
+  # shellcheck source=bin/fm-tasks-axi-lib.sh
   . "$FM_SM_LIVE_LIB_DIR/fm-tasks-axi-lib.sh"
   backend=$(fm_tasks_axi_backend "$home") || return 0
   [ "$backend" = markdown ] || return 0
@@ -148,6 +149,7 @@ fm_secondmate_domain_has_work() {
     [ -f "$home/data/backlog.md" ] && [ -r "$home/data/backlog.md" ] || return 0
     grep -qE '^[[:space:]]*- \[ \]' "$home/data/backlog.md" && return 0
   fi
+  # shellcheck source=bin/fm-pending-reply-lib.sh
   . "$FM_SM_LIVE_LIB_DIR/fm-pending-reply-lib.sh"
   fm_pending_reply_task_has_open "$parent_state" "$id" && return 0
   return 1

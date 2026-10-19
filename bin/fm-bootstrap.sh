@@ -1509,6 +1509,7 @@ project_bare_check() {
 }
 
 detect_local_config() {
+  # shellcheck source=bin/fm-bare-guard-lib.sh
   . "$SCRIPT_DIR/fm-bare-guard-lib.sh"
   project_bare_check
   # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its

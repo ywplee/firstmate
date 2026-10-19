@@ -2064,12 +2064,14 @@ test_codex_home_prefix_boundary_personal_vs_other() {
   personal="$CASE_DIR/personal"
   other="$CASE_DIR/personal-other"
   mkdir -p "$personal" "$other"
+  WT_DIR="$CASE_DIR/boundary-wt"
+  fm_git_worktree "$other" "$WT_DIR" wt-boundary
   acct=$(make_codex_home "$CASE_DIR/codex-personal")
   printf '%s %s\n' "$personal" "$acct" > "$HOME_DIR/config/codex-home"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$other")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$other")
   status=$?
-  expect_code 0 "$status" "codex spawn on a sibling path should succeed without an account assignment"
+  expect_code 0 "$status" "codex spawn on a sibling path should succeed without an account assignment: $out"
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "CODEX_HOME" "a prefix must only match on a trailing-slash boundary, not personal-other under personal"
   pass "codex-home prefix match respects the trailing-slash boundary (personal vs personal-other)"
@@ -2567,7 +2569,6 @@ fm_profile_run_test test_keep_ai_trailers_reaches_secondmate_crew_launches
 fm_profile_run_test test_claude_secondmate_launch_carries_the_attribution_policy
 fm_profile_run_test test_active_dispatch_profile_does_not_block_secondmate_launch
 
-echo "# all fm-spawn-dispatch-profile tests passed"
 
 fm_profile_run_test test_codex_home_longest_prefix_selects_account
 fm_profile_run_test test_codex_home_prefix_boundary_personal_vs_other
@@ -2602,3 +2603,5 @@ test_claude_github_token_forwarding() {
 }
 
 fm_profile_run_test test_claude_github_token_forwarding
+
+echo "# all fm-spawn-dispatch-profile tests passed"
