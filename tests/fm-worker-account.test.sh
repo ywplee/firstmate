@@ -15,6 +15,11 @@ set -u
 # shellcheck source=tests/fixtures.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
+fm_account_run_test() {
+  [ -z "${FM_TEST_ONLY:-}" ] || [ "$1" = "$FM_TEST_ONLY" ] || return 0
+  "$@"
+}
+
 TMP_ROOT=$(fm_test_tmproot fm-worker-account)
 unset LAVISH_AXI_HOST ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN PI_CODING_AGENT_DIR OPENAI_API_KEY
 
@@ -35,6 +40,7 @@ fi
   printf 'CLAUDE_CONFIG_DIR=%s\n' "\${CLAUDE_CONFIG_DIR-unset}"
   printf 'ANTHROPIC_API_KEY=%s\n' "\${ANTHROPIC_API_KEY-unset}"
   printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "\${CLAUDE_CODE_OAUTH_TOKEN-unset}"
+  printf 'ANTHROPIC_BASE_URL=%s\n' "\${ANTHROPIC_BASE_URL-unset}"
   printf 'CLAUDE_CODE_USE_BEDROCK=%s\n' "\${CLAUDE_CODE_USE_BEDROCK-unset}"
 } > '$dir/claude-worker'
 SH
@@ -112,6 +118,7 @@ run_pane() {
   env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN:$PATH" TERM=xterm \
     CLAUDE_CONFIG_DIR="$CASE/ambient-claude" ANTHROPIC_API_KEY=ambient-pane-key \
     CLAUDE_CODE_OAUTH_TOKEN=ambient-pane-token CLAUDE_CODE_USE_BEDROCK=1 \
+    ANTHROPIC_BASE_URL=https://fixture.invalid \
     PI_CODING_AGENT_DIR="$CASE/ambient-pi" OPENAI_API_KEY=ambient-pane-openai \
     bash -c "$(cat "$CASE/launch.log")" || fail "the recorded launch failed in the synthetic pane"
 }
@@ -167,6 +174,7 @@ test_claude_pin_selects_the_root_and_sheds_ambient_credentials() {
   assert_grep "ANTHROPIC_API_KEY=unset" "$CASE/claude-worker" "an ambient API key must not outrank the pin"
   assert_grep "CLAUDE_CODE_OAUTH_TOKEN=unset" "$CASE/claude-worker" "an ambient OAuth token must not outrank the pin"
   assert_grep "CLAUDE_CODE_USE_BEDROCK=unset" "$CASE/claude-worker" "an ambient cloud-provider switch must not outrank the pin"
+  assert_grep "ANTHROPIC_BASE_URL=unset" "$CASE/claude-worker" "an ambient API endpoint must not redirect a pinned account"
   pass "a Claude pin selects its root and sheds the credentials that would outrank it"
 }
 
@@ -485,21 +493,20 @@ test_remote_secondmate_account_override_refuses_locally() {
   pass "a remote route refuses a primary-side account override instead of silently ignoring it"
 }
 
-test_secondmate_account_override
-test_secondmate_account_refusals
-test_remote_secondmate_account_override_refuses_locally
-test_absent_pin_keeps_the_launch_unchanged
-test_claude_pin_selects_the_root_and_sheds_ambient_credentials
-test_claude_pin_refuses_a_signed_out_root_despite_an_ambient_login
-test_claude_ordinary_pin_unsets_the_config_root
-test_malformed_pins_refuse_before_launch
-test_pi_pin_selects_the_root_and_the_declared_provider
-test_pi_pin_refusals
-test_pi_extension_provider_and_old_pi_fall_back_to_the_model_listing
-test_a_pin_governs_only_its_own_runner
-test_raw_claude_command_receives_the_pin
-test_raw_claude_account_override_refuses_under_a_pin
-test_raw_claude_account_override_is_kept_without_a_pin
-test_local_secondmate_reads_the_launching_home_pin
-
+fm_account_run_test test_secondmate_account_override
+fm_account_run_test test_secondmate_account_refusals
+fm_account_run_test test_remote_secondmate_account_override_refuses_locally
+fm_account_run_test test_absent_pin_keeps_the_launch_unchanged
+fm_account_run_test test_claude_pin_selects_the_root_and_sheds_ambient_credentials
+fm_account_run_test test_claude_pin_refuses_a_signed_out_root_despite_an_ambient_login
+fm_account_run_test test_claude_ordinary_pin_unsets_the_config_root
+fm_account_run_test test_malformed_pins_refuse_before_launch
+fm_account_run_test test_pi_pin_selects_the_root_and_the_declared_provider
+fm_account_run_test test_pi_pin_refusals
+fm_account_run_test test_pi_extension_provider_and_old_pi_fall_back_to_the_model_listing
+fm_account_run_test test_a_pin_governs_only_its_own_runner
+fm_account_run_test test_raw_claude_command_receives_the_pin
+fm_account_run_test test_raw_claude_account_override_refuses_under_a_pin
+fm_account_run_test test_raw_claude_account_override_is_kept_without_a_pin
+fm_account_run_test test_local_secondmate_reads_the_launching_home_pin
 echo "# all fm-worker-account tests passed"

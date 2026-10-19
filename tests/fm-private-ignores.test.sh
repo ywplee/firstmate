@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -eu
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+TMP_ROOT=$(fm_test_tmproot fm-private-ignores)
+git -C "$TMP_ROOT" init -q
+cp "$ROOT/.gitignore" "$TMP_ROOT/.gitignore"
+for path in .env data/probe state/probe config/probe projects/probe .no-mistakes/probe \
+  treehouse.toml .claude/settings.local.json; do
+  git -C "$TMP_ROOT" -c core.excludesFile=/dev/null check-ignore --no-index -q "$path" \
+    || fail "shared ignore rules expose $path in a new checkout"
+done
+pass 'shared ignore rules protect private home paths and local tool settings in a new checkout'

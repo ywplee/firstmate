@@ -16,6 +16,11 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+fm_ancestry_run_test() {
+  [ -z "${FM_TEST_ONLY:-}" ] || [ "$1" = "$FM_TEST_ONLY" ] || return 0
+  "$@"
+}
+
 TMP_ROOT=$(fm_test_tmproot fm-session-lock-ancestry)
 fm_git_identity fmtest fmtest@example.invalid
 
@@ -1215,25 +1220,24 @@ test_reanchor_keeps_autoarm_midturn_healthy() {
   pass "session-lock: a re-anchor during a rewake turn keeps the mid-turn auto-arm proof healthy"
 }
 
-test_version_named_session_is_identified_on_both_platforms
-test_harness_at_namespace_pid1_is_examined
-test_ordinary_paths_are_never_harness_processes
-test_harness_beyond_a_gap_never_owns_the_lock
-test_competing_version_named_session_is_seen_as_live
-test_same_session_id_owns_a_recycled_background_chain
-test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id
-test_e2e_version_named_session_claims_the_home
-test_e2e_daemon_parented_session_claims_the_home
-test_e2e_daemon_parented_version_named_session_keeps_its_lock
-test_e2e_background_session_keeps_its_lock_across_a_recycled_chain
-test_same_session_confirmation_refreshes_rekeyed_id_under_claim_lock
-test_same_session_confirmation_does_not_steal_after_wait
-test_failed_lock_write_restores_previous_sidecar
-test_failed_lock_write_removes_new_sidecar_when_none_existed
-test_verified_reclaim_keeps_new_sidecar
-test_reanchor_keeps_task_leases_live
-test_reanchor_keeps_autoarm_midturn_healthy
-
+fm_ancestry_run_test test_version_named_session_is_identified_on_both_platforms
+fm_ancestry_run_test test_harness_at_namespace_pid1_is_examined
+fm_ancestry_run_test test_ordinary_paths_are_never_harness_processes
+fm_ancestry_run_test test_harness_beyond_a_gap_never_owns_the_lock
+fm_ancestry_run_test test_competing_version_named_session_is_seen_as_live
+fm_ancestry_run_test test_same_session_id_owns_a_recycled_background_chain
+fm_ancestry_run_test test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id
+fm_ancestry_run_test test_e2e_version_named_session_claims_the_home
+fm_ancestry_run_test test_e2e_daemon_parented_session_claims_the_home
+fm_ancestry_run_test test_e2e_daemon_parented_version_named_session_keeps_its_lock
+fm_ancestry_run_test test_e2e_background_session_keeps_its_lock_across_a_recycled_chain
+fm_ancestry_run_test test_same_session_confirmation_refreshes_rekeyed_id_under_claim_lock
+fm_ancestry_run_test test_same_session_confirmation_does_not_steal_after_wait
+fm_ancestry_run_test test_failed_lock_write_restores_previous_sidecar
+fm_ancestry_run_test test_failed_lock_write_removes_new_sidecar_when_none_existed
+fm_ancestry_run_test test_verified_reclaim_keeps_new_sidecar
+fm_ancestry_run_test test_reanchor_keeps_task_leases_live
+fm_ancestry_run_test test_reanchor_keeps_autoarm_midturn_healthy
 test_session_status_rejects_recycled_identity() (
   local dir peer identity out
   dir="$TMP_ROOT/recycled-identity"
@@ -1259,4 +1263,4 @@ test_session_status_rejects_recycled_identity() (
   pass 'session status honors matching process identities and rejects a reused PID, including legacy fork locks'
 )
 
-test_session_status_rejects_recycled_identity
+fm_ancestry_run_test test_session_status_rejects_recycled_identity

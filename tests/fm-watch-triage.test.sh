@@ -4836,10 +4836,11 @@ test_wedge_escalation_forces_blocked_reason_after_force_action_threshold() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_FORCE_ACTION_COUNT=2 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_poll_cycle "$state" "$pid"; then
     reap "$pid"; fail "watcher exited on the priming round (should absorb): $(cat "$out")"
   fi
   reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional force-action priming stop"
 
   n=1
   while [ "$n" -le 2 ]; do
@@ -4858,6 +4859,7 @@ test_wedge_escalation_forces_blocked_reason_after_force_action_threshold() {
       grep -q '^blocked: ' "$out" || fail "round $n (force-action threshold) did not force a blocked: wake: $(cat "$out")"
       grep -F "force-action threshold" "$out" >/dev/null || fail "round $n did not name the force-action threshold: $(cat "$out")"
     fi
+    ack_stopped_cycle "$state" || fail "could not acknowledge force-action escalation round $n"
     n=$((n + 1))
   done
   [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 2 ] || fail "escalation counter did not persist across force-action rounds"

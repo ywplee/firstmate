@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -u
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-ephemeral)
 
@@ -42,6 +43,7 @@ run_case() {
 }
 
 probe_case() {
+  # shellcheck disable=SC2016
   run_case bash -c '
     . "$1/bin/fm-secondmate-liveness-lib.sh"
     STATE="$FM_HOME/state"
@@ -101,7 +103,11 @@ test_force_stop_refuses_in_both_orders() {
   local args
   for args in '--stop --force' '--force --stop'; do
     make_case "force-${args// /-}"
-    if run_case "$ROOT/bin/fm-teardown.sh" sm1 $args > "$CASE/out" 2>&1; then
+    case "$args" in
+      '--stop --force') set -- --stop --force ;;
+      *) set -- --force --stop ;;
+    esac
+    if run_case "$ROOT/bin/fm-teardown.sh" sm1 "$@" > "$CASE/out" 2>&1; then
       fail 'force and stop combined'
     fi
     assert_absent "$CASE/closed" 'invalid options closed an endpoint'
@@ -109,7 +115,7 @@ test_force_stop_refuses_in_both_orders() {
   pass 'force never widens the idle process-stop authority'
 }
 
-test_idle_and_stopped_do_not_probe
-test_route_starts_before_delivery
-test_stop_preserves_home_and_refuses_work
-test_force_stop_refuses_in_both_orders
+if [ -z "${FM_TEST_ONLY:-}" ] || [ "$FM_TEST_ONLY" = test_idle_and_stopped_do_not_probe ]; then test_idle_and_stopped_do_not_probe; fi
+if [ -z "${FM_TEST_ONLY:-}" ] || [ "$FM_TEST_ONLY" = test_route_starts_before_delivery ]; then test_route_starts_before_delivery; fi
+if [ -z "${FM_TEST_ONLY:-}" ] || [ "$FM_TEST_ONLY" = test_stop_preserves_home_and_refuses_work ]; then test_stop_preserves_home_and_refuses_work; fi
+if [ -z "${FM_TEST_ONLY:-}" ] || [ "$FM_TEST_ONLY" = test_force_stop_refuses_in_both_orders ]; then test_force_stop_refuses_in_both_orders; fi

@@ -8,10 +8,9 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 : "${FM_HOME:?FM_HOME must name the owning home}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+# shellcheck source=bin/fm-secondmate-liveness-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
 
 [ "$#" -ge 2 ] || { echo "usage: fm-route-secondmate.sh <id> <message...>" >&2; exit 2; }
@@ -29,7 +28,6 @@ fi
 fm_secondmate_liveness_lock "$ID" \
   || { echo "error: another lifecycle action owns secondmate $ID" >&2; exit 1; }
 trap 'fm_secondmate_liveness_unlock "$ID"' EXIT
-cold=0
 fm_secondmate_liveness_probe "$META" "$ID" route
 if [ "$(fm_meta_get "$META" stopped)" = 1 ]; then
   case "$FM_SM_LIVE_STATE" in

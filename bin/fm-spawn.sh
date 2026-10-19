@@ -3804,10 +3804,10 @@ real_path_or_raw() { # <path>
 expand_home_path() {
   local p=$1
   case "$p" in
-    '~') printf '%s\n' "$HOME" ;;
-    '~/'*) printf '%s\n' "$HOME/${p#\~/}" ;;
-    '$HOME') printf '%s\n' "$HOME" ;;
-    '$HOME/'*) printf '%s\n' "$HOME/${p#\$HOME/}" ;;
+    \~) printf '%s\n' "$HOME" ;;
+    \~/*) printf '%s\n' "$HOME/${p#\~/}" ;;
+    \$HOME) printf '%s\n' "$HOME" ;;
+    \$HOME/*) printf '%s\n' "$HOME/${p#\$HOME/}" ;;
     *) printf '%s\n' "$p" ;;
   esac
 }
