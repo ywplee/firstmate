@@ -199,6 +199,7 @@
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record] | <secondmate-id> --stop
 #   --stop closes only an idle local secondmate endpoint and records stopped=1;
+#     currently requires tmux, whose close and agent-state checks are verified.
 #   its home, lease, backlog, and registry entry survive. An unknown backlog is
 #   not idle proof. Never combines with --force or --legacy-record.
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
@@ -3438,6 +3439,7 @@ require_owned_task_worktree_slot || exit 1
 if [ "$STOP" = 1 ]; then
   [ "$KIND" = secondmate ] || { echo "error: --stop applies only to a secondmate" >&2; exit 2; }
   [ -z "$(fm_meta_get "$META" remote_host)" ] || { echo "error: --stop requires a local secondmate; remote lifecycle stays on its owning host" >&2; exit 1; }
+  [ "$BACKEND" = tmux ] || { echo "error: --stop currently requires tmux; this backend's ordinary guarded lifecycle remains authoritative" >&2; exit 1; }
   # shellcheck source=bin/fm-secondmate-liveness-lib.sh
   . "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
@@ -3449,6 +3451,10 @@ if [ "$STOP" = 1 ]; then
     echo "error: secondmate $ID endpoint could not be closed; stopped state was not recorded" >&2
     exit 1
   fi
+  case "$(fm_backend_agent_state "$BACKEND" "$T")" in
+    dead|missing) ;;
+    *) echo "error: secondmate $ID is not confirmed stopped; stopped state was not recorded" >&2; exit 1 ;;
+  esac
   fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
   if ! grep -q '^stopped=1$' "$META"; then
     printf 'stopped=1\n' >> "$META"

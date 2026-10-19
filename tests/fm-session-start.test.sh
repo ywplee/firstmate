@@ -615,6 +615,7 @@ EOF
   printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
   printf '# Firstmate\n' > "$mate/AGENTS.md"
   printf 'Second mate charter.\n' > "$mate/data/charter.md"
+  printf '%s\n' '- [ ] startup-recovery Existing work' > "$mate/data/backlog.md"
   printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$mate/.gitignore"
   git -C "$mate" init -q -b main
   printf '%s\n' pi > "$home/config/secondmate-harness"
@@ -658,6 +659,7 @@ EOF
   printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
   printf '# Firstmate\n' > "$mate/AGENTS.md"
   printf 'Second mate charter.\n' > "$mate/data/charter.md"
+  printf '%s\n' '- [ ] startup-recovery Existing work' > "$mate/data/backlog.md"
   printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$mate/.gitignore"
   git -C "$mate" init -q -b main
   printf '%s\n' herdr > "$home/config/backend"

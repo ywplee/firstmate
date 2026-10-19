@@ -17,7 +17,7 @@ case "$1" in
   display-message)
     case "$*" in *pane_current_command*) printf '%s\n' claude ;; esac ;;
   list-windows) [ -e "$FM_TEST_CASE/closed" ] || printf '%s\n' fm-sm1 ;;
-  kill-window) touch "$FM_TEST_CASE/closed" ;;
+  kill-window) [ "${FM_TEST_CLOSE_NOOP:-}" = 1 ] || touch "$FM_TEST_CASE/closed" ;;
 esac
 exit 0
 SH
@@ -129,8 +129,19 @@ test_unreadable_work_does_not_prove_idle() {
   pass 'broken backlog and child records retain recovery and refuse an idle stop'
 }
 
+test_stop_requires_confirmation() {
+  make_case unconfirmed
+  if FM_TEST_CLOSE_NOOP=1 run_case "$ROOT/bin/fm-teardown.sh" sm1 --stop > "$CASE/out" 2>&1; then
+    fail 'an accepted close without process termination reported stopped'
+  fi
+  assert_no_grep 'stopped=1' "$CASE/parent/state/sm1.meta" 'a surviving agent was marked stopped'
+  assert_present "$CASE/mate/data" 'a refused close removed the home'
+  pass 'a close that leaves the agent alive cannot publish stopped state'
+}
+
 if [ -z "${FM_TEST_ONLY:-}" ] || [ "$FM_TEST_ONLY" = test_idle_and_stopped_do_not_probe ]; then test_idle_and_stopped_do_not_probe; fi
 if [ -z "${FM_TEST_ONLY:-}" ] || [ "$FM_TEST_ONLY" = test_route_starts_before_delivery ]; then test_route_starts_before_delivery; fi
 if [ -z "${FM_TEST_ONLY:-}" ] || [ "$FM_TEST_ONLY" = test_stop_preserves_home_and_refuses_work ]; then test_stop_preserves_home_and_refuses_work; fi
 if [ -z "${FM_TEST_ONLY:-}" ] || [ "$FM_TEST_ONLY" = test_force_stop_refuses_in_both_orders ]; then test_force_stop_refuses_in_both_orders; fi
 if [ -z "${FM_TEST_ONLY:-}" ] || [ "$FM_TEST_ONLY" = test_unreadable_work_does_not_prove_idle ]; then test_unreadable_work_does_not_prove_idle; fi
+if [ -z "${FM_TEST_ONLY:-}" ] || [ "$FM_TEST_ONLY" = test_stop_requires_confirmation ]; then test_stop_requires_confirmation; fi

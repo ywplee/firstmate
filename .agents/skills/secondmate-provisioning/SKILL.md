@@ -219,7 +219,7 @@ Do not hand off `local-only` items.
 
 ## Recovery
 
-An idle local secondmate may stop its resident process through `bin/fm-teardown.sh <id> --stop` without retiring its home.
+An idle local tmux secondmate may stop its resident process through `bin/fm-teardown.sh <id> --stop` without retiring its home; the script's help owns backend limits.
 A `stopped=1` record is intentional and must stay down during recovery, startup, and watcher liveness checks.
 Route new local work through `bin/fm-route-secondmate.sh`, which shares upstream's liveness lock and classifier, starts a stopped or confidently dead mate, verifies it is running, and then delivers.
 Remote mates retain upstream's owning-host lifecycle; the local idle-stop path refuses them.
