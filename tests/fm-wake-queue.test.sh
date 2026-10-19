@@ -3395,6 +3395,7 @@ test_secondmate_liveness_tick_error_keeps_scanning_and_wakes() {
   printf 'sm2\n' > "$home/.fm-secondmate-home"
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf 'charter\n' > "$home/data/charter.md"
+  printf '%s\n' '- [ ] watcher-recovery Existing work' > "$home/data/backlog.md"
   printf 'window=firstmate:fm-sm2\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
     "$home" > "$state/sm2.meta"
   : > "$state/.secondmate-relaunch-sm1"
