@@ -139,13 +139,13 @@ fm_secondmate_domain_has_work() {
   local parent_state=$1 id=$2 home=$3 child_meta backend
   [ -d "$home/data" ] && [ -d "$home/state" ] || return 0
   for child_meta in "$home"/state/*.meta; do
-    [ -e "$child_meta" ] && return 0
+    { [ -e "$child_meta" ] || [ -L "$child_meta" ]; } && return 0
   done
   # shellcheck source=bin/fm-tasks-axi-lib.sh
   . "$FM_SM_LIVE_LIB_DIR/fm-tasks-axi-lib.sh"
   backend=$(fm_tasks_axi_backend "$home") || return 0
   [ "$backend" = markdown ] || return 0
-  if [ -e "$home/data/backlog.md" ]; then
+  if [ -e "$home/data/backlog.md" ] || [ -L "$home/data/backlog.md" ]; then
     [ -f "$home/data/backlog.md" ] && [ -r "$home/data/backlog.md" ] || return 0
     grep -qE '^[[:space:]]*- \[ \]' "$home/data/backlog.md" && return 0
   fi

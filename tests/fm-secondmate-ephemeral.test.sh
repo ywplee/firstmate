@@ -115,7 +115,22 @@ test_force_stop_refuses_in_both_orders() {
   pass 'force never widens the idle process-stop authority'
 }
 
+test_unreadable_work_does_not_prove_idle() {
+  local path
+  for path in data/backlog.md state/child.meta; do
+    make_case "unknown-${path//\//-}"
+    ln -s "$CASE/missing" "$CASE/mate/$path"
+    assert_equals relaunchable "$(probe_case)" 'a broken work record must keep recovery enabled'
+    if run_case "$ROOT/bin/fm-teardown.sh" sm1 --stop > "$CASE/out" 2>&1; then
+      fail 'stop treated a broken work record as proof of idleness'
+    fi
+    assert_absent "$CASE/closed" 'an unknown work state closed its endpoint'
+  done
+  pass 'broken backlog and child records retain recovery and refuse an idle stop'
+}
+
 if [ -z "${FM_TEST_ONLY:-}" ] || [ "$FM_TEST_ONLY" = test_idle_and_stopped_do_not_probe ]; then test_idle_and_stopped_do_not_probe; fi
 if [ -z "${FM_TEST_ONLY:-}" ] || [ "$FM_TEST_ONLY" = test_route_starts_before_delivery ]; then test_route_starts_before_delivery; fi
 if [ -z "${FM_TEST_ONLY:-}" ] || [ "$FM_TEST_ONLY" = test_stop_preserves_home_and_refuses_work ]; then test_stop_preserves_home_and_refuses_work; fi
 if [ -z "${FM_TEST_ONLY:-}" ] || [ "$FM_TEST_ONLY" = test_force_stop_refuses_in_both_orders ]; then test_force_stop_refuses_in_both_orders; fi
+if [ -z "${FM_TEST_ONLY:-}" ] || [ "$FM_TEST_ONLY" = test_unreadable_work_does_not_prove_idle ]; then test_unreadable_work_does_not_prove_idle; fi

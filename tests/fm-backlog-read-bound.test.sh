@@ -383,6 +383,7 @@ cat > "$E2E_FAKEBIN/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
 case "$*" in
+  *"lstart="*) exec /bin/ps "$@" ;;
   *"comm="*) printf '%s\n' '/usr/local/bin/claude'; exit 0 ;;
   *"args="*) printf '%s\n' 'claude'; exit 0 ;;
   *"ppid="*) exit 1 ;;
