@@ -26,6 +26,9 @@
 # bin/fm-pr-check.sh (PR registration), and bin/fm-inactive-reconcile.sh
 # (secondmate ledger-first publish of a child done). A ship `done:` is not
 # accepted while the named head exists only in the worker's disposable copy.
+# Before an unreachable refusal, PR-based tasks refresh only the recorded task
+# branch in the project clone, with a 30-second fetch bound and normal git
+# credentials; a failed fetch retains the old verdict and adds its diagnostic.
 # The check tests that head, not whether some branch moved. In no-mistakes
 # mode the pre-validation `done: {summary}` is the pipeline handoff and is
 # not gated; only the later CI-ready `done: PR <url> checks green` is, or on a
@@ -911,9 +914,11 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     return 0
   fi
   if [ "$mode" != local-only ] && [ -n "$url" ] && [ -d "$project" ]; then
-    fetch_error=$(fm_dod_refresh_task_branch "$project" "$meta" "$url") || {
+    if fetch_error=$(fm_dod_refresh_task_branch "$project" "$meta" "$url"); then
+      fetch_error=
+    else
       fetch_error="; task branch fetch failed: $(printf '%s' "$fetch_error" | tr '\r\n' '  ')"
-    }
+    fi
     if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
       return 0
     fi

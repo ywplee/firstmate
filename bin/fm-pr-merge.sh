@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Merge a task's PR or MR after recording pr= and any available pr_head= through
-# bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
+# bin/fm-pr-check.sh, whose named-head gate refreshes stale task-branch refs
+# before refusing, so teardown can verify landed work after squash merges.
+# A direct-PR task must also match the live forge head before the merge call.
 # The full canonical URL is parsed by bin/fm-pr-lib.sh. A GitHub pull request is
 # addressed through gh by the derived owner and repository; a GitLab merge
 # request is addressed through glab by the project URL rebuilt from the parsed
