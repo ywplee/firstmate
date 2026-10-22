@@ -26,6 +26,9 @@
 # bin/fm-pr-check.sh (PR registration), and bin/fm-inactive-reconcile.sh
 # (secondmate ledger-first publish of a child done). A ship `done:` is not
 # accepted while the named head exists only in the worker's disposable copy.
+# Before an unreachable refusal, PR-based tasks refresh only the recorded task
+# branch in the project clone, with a 30-second fetch bound and normal git
+# credentials; a failed fetch retains the old verdict and adds its diagnostic.
 # The check tests that head, not whether some branch moved. In no-mistakes
 # mode the pre-validation `done: {summary}` is the pipeline handoff and is
 # not gated; only the later CI-ready `done: PR <url> checks green` is, or on a
@@ -835,6 +838,26 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
   [ "$mode" = local-only ] && fm_dod_ref_contains "$project" refs/heads "$sha"
 }
 
+fm_dod_refresh_task_branch() {
+  local project=$1 meta=$2 url=$3 branch remote fetch_url target
+  fm_pr_url_parse "$url" || return 0
+  case "$FM_PR_PROVIDER" in github|gitlab|forgejo) ;; *) return 0 ;; esac
+  branch=$(fm_dod_meta_value "$meta" branch)
+  [ -n "$branch" ] || return 0
+  git check-ref-format "refs/heads/$branch" >/dev/null 2>&1 || return 0
+  target="https://$FM_PR_HOST/$FM_PR_PATH"
+  fetch_url="$target.git"
+  for remote in $(git -C "$project" remote 2>/dev/null); do
+    case "$(git -C "$project" remote get-url "$remote" 2>/dev/null)" in
+      "$target"|"$target.git"|"git@$FM_PR_HOST:$FM_PR_PATH"|"git@$FM_PR_HOST:$FM_PR_PATH.git"|"ssh://git@$FM_PR_HOST/$FM_PR_PATH"|"ssh://git@$FM_PR_HOST/$FM_PR_PATH.git")
+        fetch_url=$remote
+        break ;;
+    esac
+  done
+  GIT_TERMINAL_PROMPT=0 fm_run_timed 30 git -C "$project" fetch --quiet --no-tags --no-recurse-submodules \
+    "$fetch_url" "+refs/heads/$branch:refs/remotes/origin/$branch" 2>&1
+}
+
 # 0 when <line> is not a ship done: to gate, when the task's meta records
 # forge=external and fm_dod_accept_external_review_done accepts it, when it
 # names the task's recorded PR whose head the forge holds, when it names a
@@ -848,7 +871,7 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # pr_head=, and the merge-notified marker; <meta> may be a captured copy
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
-  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit
+  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit fetch_error=
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
   if [ -n "$meta" ] && [ "$(fm_dod_meta_value "$meta" forge)" = external ]; then
     fm_dod_accept_external_review_done "$wt" "$project" "$line" "$meta"
@@ -890,6 +913,16 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
   if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
     return 0
   fi
-  printf '%s\n' "named head $sha is unreachable outside the worker copy"
+  if [ "$mode" != local-only ] && [ -n "$url" ] && [ -d "$project" ]; then
+    if fetch_error=$(fm_dod_refresh_task_branch "$project" "$meta" "$url"); then
+      fetch_error=
+    else
+      fetch_error="; task branch fetch failed: $(printf '%s' "$fetch_error" | tr '\r\n' '  ')"
+    fi
+    if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
+      return 0
+    fi
+  fi
+  printf '%s\n' "named head $sha is unreachable outside the worker copy$fetch_error"
   return 1
 }

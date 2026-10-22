@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Merge a task's PR or MR after recording pr= and any available pr_head= through
-# bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
+# bin/fm-pr-check.sh, whose named-head gate refreshes stale task-branch refs
+# before refusing, so teardown can verify landed work after squash merges.
+# A direct-PR task must also match the live forge head before the merge call.
 # The full canonical URL is parsed by bin/fm-pr-lib.sh. A GitHub pull request is
 # addressed through gh by the derived owner and repository; a GitLab merge
 # request is addressed through glab by the project URL rebuilt from the parsed
@@ -1367,6 +1369,18 @@ record_pr_metadata() {
   }
 }
 
+require_task_head_matches_forge() {
+  local mode wt head
+  mode=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
+  [ "$mode" = direct-PR ] || return 0
+  wt=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+  head=$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null) || return 1
+  if [ "$head" != "$FM_PR_MERGE_HEAD" ]; then
+    printf 'error: named head %s does not match the PR head %s on the forge\n' "$head" "$FM_PR_MERGE_HEAD" >&2
+    return 1
+  fi
+}
+
 require_released_captain_hold() {
   local hold_status=0
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
@@ -1698,6 +1712,7 @@ case "$PROVIDER" in
     fi
     # The away record is locked first, so this last presence and authority read
     # and the forge command below share one live-owner critical section.
+    require_task_head_matches_forge || exit 1
     hold_away_record_for_merge || exit 1
     away_status=0
     require_current_away_authority || away_status=$?
@@ -1753,6 +1768,7 @@ case "$PROVIDER" in
     # the conditions above are what authorize the merge.
     # The away record is locked first, so this last presence and authority read
     # and the forge command below share one live-owner critical section.
+    require_task_head_matches_forge || exit 1
     hold_away_record_for_merge || exit 1
     away_status=0
     require_current_away_authority || away_status=$?
@@ -1785,6 +1801,7 @@ case "$PROVIDER" in
     forgejo_verify_mergeable || exit 1
     # The away record is locked first, so this last presence and authority
     # read and the forge command below share one live-owner critical section.
+    require_task_head_matches_forge || exit 1
     hold_away_record_for_merge || exit 1
     away_status=0
     require_current_away_authority || away_status=$?

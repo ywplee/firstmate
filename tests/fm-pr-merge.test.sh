@@ -2970,6 +2970,92 @@ test_secondmate_without_parent_binding_is_loud() {
   pass "a secondmate home that cannot report upward says so instead of merging in silence"
 }
 
+test_force_pushed_task_branch_refreshes_before_merge() {
+  local variant provider spec case_dir old head rc url repo_url forge_head
+  for spec in github:matching github:mismatch github:offline gitlab:matching gitlab:mismatch forgejo:matching forgejo:mismatch; do
+    provider=${spec%:*}
+    variant=${spec#*:}
+    case "$provider" in
+      github)
+        case_dir=$(make_case "force-push-$provider-$variant")
+        url=https://github.com/example/repo/pull/9
+        repo_url=https://github.com/example/repo.git ;;
+      gitlab)
+        case_dir=$(make_gitlab_case "force-push-$provider-$variant")
+        url=$MR_URL
+        repo_url="$MR_PROJECT_URL.git" ;;
+      forgejo)
+        case_dir=$(make_forgejo_case "force-push-$provider-$variant")
+        url=$FJ_URL
+        repo_url="https://$FJ_HOST/$FJ_OWNER/$FJ_REPO.git" ;;
+    esac
+    old=$(git -C "$case_dir/wt" rev-parse HEAD)
+    git init --quiet --bare "$case_dir/forge.git"
+    git -C "$case_dir/wt" push --quiet "$case_dir/forge.git" HEAD:refs/heads/fm/task-x1
+    git clone --quiet "$case_dir/forge.git" "$case_dir/project" 2>/dev/null
+    git -C "$case_dir/project" config url."$case_dir/forge.git".insteadOf "$repo_url"
+    git -C "$case_dir/wt" commit --quiet --amend --allow-empty -m 'rebased task head'
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    [ "$head" != "$old" ] || fail "force-push fixture did not rewrite the head"
+    git -C "$case_dir/wt" push --quiet --force "$case_dir/forge.git" HEAD:refs/heads/fm/task-x1
+    git -C "$case_dir/wt" push --quiet "$case_dir/forge.git" HEAD:refs/heads/unrelated
+    git -C "$case_dir/wt" push --quiet "$case_dir/forge.git" HEAD:refs/tags/unrelated
+    [ "$(git -C "$case_dir/project" rev-parse refs/remotes/origin/fm/task-x1)" = "$old" ] \
+      || fail "force-push fixture lacks a stale tracking ref"
+    fm_write_meta "$case_dir/state/task-x1.meta" kind=ship mode=direct-PR branch=fm/task-x1 \
+      "worktree=$case_dir/wt" "project=$case_dir/project"
+    forge_head=$head
+    [ "$variant" != mismatch ] || forge_head=$old
+    case "$provider" in
+      github) add_gh_mocks "$case_dir" "$forge_head" ;;
+      gitlab) write_mr_json "$case_dir/mr.json" head="$forge_head" pipeline_sha="$forge_head" ;;
+      forgejo)
+        write_forgejo_pr_json "$case_dir/pr.json" head="$forge_head"
+        printf '%s\n' "$forge_head" > "$case_dir/tea-expected-head" ;;
+    esac
+    [ "$variant" != offline ] || mv "$case_dir/forge.git" "$case_dir/offline.git"
+    rc=0
+    run_pr_merge "$case_dir" task-x1 "$url" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    case "$variant" in
+      matching)
+        expect_code 0 "$rc" "force-pushed head with stale tracking ref must merge"
+        case "$provider" in
+          github) assert_logged_gh_merge "$case_dir" 9 example/repo --squash ;;
+          gitlab) assert_grep "--sha $head" "$case_dir/glab.log" "merge was not bound to the live head" ;;
+          forgejo) assert_grep "head_commit_id=$head" "$case_dir/tea.log" "merge was not bound to the live head" ;;
+        esac
+        [ "$(git -C "$case_dir/project" rev-parse refs/remotes/origin/fm/task-x1)" = "$head" ] \
+          || fail "task branch tracking ref was not refreshed"
+        git -C "$case_dir/project" show-ref --verify --quiet refs/remotes/origin/unrelated \
+          && fail "refresh fetched an unrelated branch"
+        git -C "$case_dir/project" show-ref --verify --quiet refs/tags/unrelated \
+          && fail "refresh fetched an unrelated tag"
+        ;;
+      mismatch)
+        expect_code 1 "$rc" "a differing live PR head must refuse"
+        assert_grep "does not match the PR head $old on the forge" "$case_dir/stderr" \
+          "head mismatch refusal is missing"
+        ;;
+      offline)
+        expect_code 1 "$rc" "failed fetch with stale evidence must refuse"
+        assert_grep "named head $head is unreachable outside the worker copy; task branch fetch failed:" \
+          "$case_dir/stderr" "fetch failure was not included in the refusal"
+        ;;
+    esac
+    if [ "$variant" != matching ]; then
+      case "$provider" in
+        github) assert_no_grep ' pr merge ' "$case_dir/gh.log" "refused merge called the forge" ;;
+        gitlab) assert_no_grep ' mr merge ' "$case_dir/glab.log" "refused merge called the forge" ;;
+        forgejo) [ -z "$(tea_merge_line "$case_dir/tea.log")" ] || fail "refused merge called the forge" ;;
+      esac
+    fi
+  done
+  pass "force-pushed task head refreshes stale refs, while differing forge heads and offline failures refuse"
+}
+
+test_force_pushed_task_branch_refreshes_before_merge
+
 test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance
