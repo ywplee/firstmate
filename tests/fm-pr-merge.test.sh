@@ -2970,6 +2970,64 @@ test_secondmate_without_parent_binding_is_loud() {
   pass "a secondmate home that cannot report upward says so instead of merging in silence"
 }
 
+test_force_pushed_task_branch_refreshes_before_merge() {
+  local variant case_dir old head rc
+  for variant in matching mismatch offline; do
+    case_dir=$(make_case "force-push-$variant")
+    old=$(git -C "$case_dir/wt" rev-parse HEAD)
+    git init --quiet --bare "$case_dir/forge.git"
+    git -C "$case_dir/wt" push --quiet "$case_dir/forge.git" HEAD:refs/heads/fm/task-x1
+    git clone --quiet "$case_dir/forge.git" "$case_dir/project" 2>/dev/null
+    git -C "$case_dir/project" config url."$case_dir/forge.git".insteadOf https://github.com/example/repo.git
+    git -C "$case_dir/wt" commit --quiet --amend --allow-empty -m 'rebased task head'
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    [ "$head" != "$old" ] || fail "force-push fixture did not rewrite the head"
+    git -C "$case_dir/wt" push --quiet --force "$case_dir/forge.git" HEAD:refs/heads/fm/task-x1
+    git -C "$case_dir/wt" push --quiet "$case_dir/forge.git" HEAD:refs/heads/unrelated
+    git -C "$case_dir/wt" push --quiet "$case_dir/forge.git" HEAD:refs/tags/unrelated
+    [ "$(git -C "$case_dir/project" rev-parse refs/remotes/origin/fm/task-x1)" = "$old" ] \
+      || fail "force-push fixture lacks a stale tracking ref"
+    fm_write_meta "$case_dir/state/task-x1.meta" kind=ship mode=direct-PR branch=fm/task-x1 \
+      "worktree=$case_dir/wt" "project=$case_dir/project"
+    add_gh_mocks "$case_dir" "$head"
+    case "$variant" in
+      mismatch) write_github_live_json "$case_dir" "$old" ;;
+      offline) mv "$case_dir/forge.git" "$case_dir/offline.git" ;;
+    esac
+    rc=0
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    case "$variant" in
+      matching)
+        expect_code 0 "$rc" "force-pushed head with stale tracking ref must merge"
+        assert_logged_gh_merge "$case_dir" 9 example/repo --squash
+        [ "$(git -C "$case_dir/project" rev-parse refs/remotes/origin/fm/task-x1)" = "$head" ] \
+          || fail "task branch tracking ref was not refreshed"
+        git -C "$case_dir/project" show-ref --verify --quiet refs/remotes/origin/unrelated \
+          && fail "refresh fetched an unrelated branch"
+        git -C "$case_dir/project" show-ref --verify --quiet refs/tags/unrelated \
+          && fail "refresh fetched an unrelated tag"
+        ;;
+      mismatch)
+        expect_code 1 "$rc" "a differing live PR head must refuse"
+        assert_grep "does not match the PR head $old on the forge" "$case_dir/stderr" \
+          "head mismatch refusal is missing"
+        ;;
+      offline)
+        expect_code 1 "$rc" "failed fetch with stale evidence must refuse"
+        assert_grep "named head $head is unreachable outside the worker copy; task branch fetch failed:" \
+          "$case_dir/stderr" "fetch failure was not included in the refusal"
+        ;;
+    esac
+    if [ "$variant" != matching ]; then
+      assert_no_grep ' pr merge ' "$case_dir/gh.log" "refused merge called the forge"
+    fi
+  done
+  pass "force-pushed task head refreshes stale refs, while differing forge heads and offline failures refuse"
+}
+
+test_force_pushed_task_branch_refreshes_before_merge
+
 test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance
