@@ -42,6 +42,15 @@ model() {
   cat "$FORGE/pr-$n.json"
 }
 case "$1 $2" in
+  'api --paginate')
+    case "$3" in
+      'repos/o/r/actions/runs?head_sha='*) printf '{"workflow_runs":[]}\n' ;;
+      repos/o/r/commits/*/status\?*)
+        head=${3#repos/o/r/commits/}
+        head=${head%%/*}
+        jq -n --arg head "$head" '{sha:$head,statuses:[]}' ;;
+      *) printf 'unexpected gh fixture call: %s\n' "$*" >&2; exit 1 ;;
+    esac ;;
   'api graphql')
     n=
     for arg in "$@"; do case "$arg" in number=*) n=${arg#number=} ;; esac; done
