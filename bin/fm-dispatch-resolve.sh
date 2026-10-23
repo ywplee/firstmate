@@ -26,7 +26,7 @@
 #   candidate binds to one row through quota_row in
 #   bin/fm-quota-axi-lib.sh, so a Pi lane such as openai-codex-work/...
 #   reads its own account's row and an expanded provider with no row for the
-#   candidate is unmeasured, never blocked), and the spendPriority argmax over
+#   candidate is unmeasured, never blocked), and the runway-aware ranking over
 #   the eligible candidates. The model never sees quota, catalogs, approvals,
 #   confidence floors, `why`, or `use`. With no rules, it returns a non-clear
 #   result so firstmate keeps using the existing intake.
@@ -458,10 +458,18 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
       elif any($rows[]; (.selection.spendPriority | type) != "number") then
         ($rows | map(select((.selection.spendPriority | type) != "number")) | first) as $bad |
         {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: $bad.effectivePercentRemaining, runway: $bad.runway.status, eligible: true, unranked: true, reason: "spendPriority missing or non-numeric at \($bad.scope): not rankable"}
+      elif any($rows[]; .runway.status == "unknown" or
+        (.runway.status == "projected_exhaustion" and
+         ((.runway.usableRunwaySeconds | type) != "number" or .runway.usableRunwaySeconds <= 0))) then
+        {profile: $c, provider: $p, bounds: $bounds, eligible: true, unranked: true,
+         reason: "usable runway unknown or invalid: not rankable"}
       else
         ($rows | min_by(.selection.spendPriority)) as $limiting |
+        ([$rows[] | select(.runway.status == "projected_exhaustion") | .runway.usableRunwaySeconds] | min) as $seconds |
         {profile: $c, provider: $p, bounds: $bounds, scope: $limiting.scope, pct: $limiting.effectivePercentRemaining,
-         spendPriority: $limiting.selection.spendPriority, runway: $limiting.runway.status, eligible: true, reason: "ok"}
+         spendPriority: $limiting.selection.spendPriority,
+         runway: (if $seconds != null then "projected_exhaustion" else "through_reset" end),
+         usableRunwaySeconds: $seconds, eligible: true, reason: "ok"}
       end
     end;
   def rule_at($c):
@@ -525,9 +533,12 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     ([$cands[] | select(.unranked)]) as $unranked |
     if ($elig | length) == 0 then $ev + {status: "escalate", reason: "no rankable eligible candidate", note: $sel.note, candidates: $cands}
     else
-      ($elig | max_by(.spendPriority)) as $best |
-      ([$elig[] | select(.spendPriority == $best.spendPriority)] | length) as $ties |
-      if $ties > 1 then $ev + {status: "escalate", reason: "genuine spendPriority tie", note: $sel.note, candidates: $cands}
+      ([$elig[] | select(.runway == "through_reset")]) as $through_reset |
+      (if ($through_reset | length) > 0 then "spendPriority" else "usableRunwaySeconds" end) as $ranker |
+      (if ($through_reset | length) > 0 then $through_reset else $elig end) as $ranked |
+      ($ranked | max_by(.[$ranker])) as $best |
+      ([$ranked[] | select(.[$ranker] == $best[$ranker])] | length) as $ties |
+      if $ties > 1 then $ev + {status: "escalate", reason: "genuine \($ranker) tie", note: $sel.note, candidates: $cands}
       else $ev + {status: "clear", note: $sel.note, candidates: $cands, chosen: $best}
         + (if ($unranked | length) > 0 then
              {unranked_note: "\($unranked | length) eligible candidate(s) unranked (\([$unranked[].provider] | unique | join(", ")))"}
@@ -548,6 +559,7 @@ TEXT=$(jq -r '
   (if .fallback then "  fallback: \(.fallback | flat)" else empty end),
   (if .reason then "  reason: \(.reason | flat)" else empty end),
   (if .note then "  note: \(.note | flat)" else empty end),
+  (if .chosen then "  ranking: \(if .chosen.runway == "through_reset" then "through_reset, then spendPriority" else "usableRunwaySeconds=\(.chosen.usableRunwaySeconds)" end)" else empty end),
   (if .unranked_note then "  note: \(.unranked_note | flat)" else empty end),
   (.candidates[]? | "  candidate: \(.profile.harness | flat):\(show(.profile.model))"
       + (if .provider then "  provider=\(.provider | flat)" else "" end)
