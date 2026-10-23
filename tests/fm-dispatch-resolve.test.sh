@@ -79,10 +79,10 @@ write_quota() {  # <path> <cursor spendPriority> [<claude all_models spendPriori
   "schemaVersion": 5,
   "providers": [
     { "provider": "claude", "state": { "status": "fresh" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
-      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 79, "runway": { "status": "projected_exhaustion" }, "selection": { "spendPriority": $claude } },
-      { "scope": "model:fable", "status": "known", "effectivePercentRemaining": 15, "runway": { "status": "projected_exhaustion" }, "selection": { "spendPriority": -0.79 } } ] } },
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 79, "runway": { "status": "projected_exhaustion", "usableRunwaySeconds": 100000 }, "selection": { "spendPriority": $claude } },
+      { "scope": "model:fable", "status": "known", "effectivePercentRemaining": 15, "runway": { "status": "projected_exhaustion", "usableRunwaySeconds": 100000 }, "selection": { "spendPriority": -0.79 } } ] } },
     { "provider": "codex", "state": { "status": "fresh" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
-      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 31, "runway": { "status": "projected_exhaustion" }, "selection": { "spendPriority": -0.1649 } } ] } },
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 31, "runway": { "status": "projected_exhaustion", "usableRunwaySeconds": 200000 }, "selection": { "spendPriority": -0.1649 } } ] } },
     { "provider": "cursor", "state": { "status": "fresh" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
       { "scope": "all_models", "status": "known", "effectivePercentRemaining": 91, "runway": { "status": "through_reset" }, "selection": { "spendPriority": $cursor } } ] } },
     { "provider": "agy", "state": { "status": "fresh" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
@@ -792,6 +792,78 @@ assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_mod
 assert_contains "$out" '-> not eligible: runway exhausted_now at all_models' "a healthy exact row cannot bypass an exhausted account-wide bound"
 pass "provider-wide and exact quota rows combine into one limiting candidate"
 
+RUNWAY_QUOTA="$TMP_ROOT/runway.json"
+RUNWAY_RULES="$TMP_ROOT/runway-rules.json"
+jq '.rules[3].use = [{harness: "claude", model: "sonnet"}, {harness: "codex", model: "gpt-5.6-sol"}]' "$BASE_RULES" > "$RUNWAY_RULES"
+cat > "$RUNWAY_QUOTA" <<'JSON'
+{
+  "schemaVersion": 5,
+  "providers": [
+    {"provider": "claude", "windows": [{"id": "seven-day", "resetsAt": "2026-10-26T00:00:00Z"}],
+     "quotaSemantics": {"status": "known", "effectiveAvailability": [
+       {"scope": "all_models", "status": "known", "effectivePercentRemaining": 21,
+        "selection": {"spendPriority": -0.66},
+        "runway": {"status": "projected_exhaustion", "usableRunwaySeconds": 90529, "projectionConfidence": "established"}}]}},
+    {"provider": "codex", "windows": [{"id": "weekly", "resetsAt": "2026-10-29T00:00:00Z"}],
+     "quotaSemantics": {"status": "known", "effectiveAvailability": [
+       {"scope": "all_models", "status": "known", "effectivePercentRemaining": 88,
+        "selection": {"spendPriority": -0.99},
+        "runway": {"status": "projected_exhaustion", "usableRunwaySeconds": 275618, "projectionConfidence": "early"}}]}}
+  ]
+}
+JSON
+write_response "$RESPONSE" rule_4 0.9
+for order in original reversed; do
+  jq --arg order "$order" 'if $order == "reversed" then .rules[3].use |= reverse else . end' "$RUNWAY_RULES" > "$RULES"
+  TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$RUNWAY_QUOTA" run code out err "$BRIEF"
+  assert_contains "$out" "  profile: --harness 'codex'" "longest projected runway wins regardless of candidate order"
+  assert_contains "$out" '  ranking: usableRunwaySeconds=275618' "the deciding runway is inspectable"
+done
+jq '(.providers[].quotaSemantics.effectiveAvailability[].runway.status) = "through_reset"' "$RUNWAY_QUOTA" > "$TMP_ROOT/through-reset.json"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/through-reset.json" run code out err "$BRIEF"
+assert_contains "$out" "  profile: --harness 'claude'" "spendPriority still decides when both reach reset"
+
+jq '(.providers[] | select(.provider == "codex") | .quotaSemantics.effectiveAvailability[].runway.status) = "through_reset"' "$RUNWAY_QUOTA" > "$TMP_ROOT/mixed-runway.json"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/mixed-runway.json" run code out err "$BRIEF"
+assert_contains "$out" "  profile: --harness 'codex'" "through_reset beats a higher spendPriority projected exhaustion"
+
+jq '(.providers[] | select(.provider == "codex") | .quotaSemantics.effectiveAvailability[]) |=
+  (.selection.spendPriority = -0.1 | .runway.usableRunwaySeconds = 10000)' "$RUNWAY_QUOTA" > "$TMP_ROOT/early-pace.json"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/early-pace.json" run code out err "$BRIEF"
+assert_contains "$out" "  profile: --harness 'claude'" "early-confidence spendPriority cannot override a longer established runway"
+
+jq '(.providers[].quotaSemantics.effectiveAvailability[].runway.usableRunwaySeconds) = 90529' "$RUNWAY_QUOTA" > "$TMP_ROOT/runway-tie.json"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/runway-tie.json" run code out err "$BRIEF"
+assert_contains "$out" '  reason: genuine usableRunwaySeconds tie' "equal projected runways escalate despite unequal spendPriority"
+assert_not_contains "$out" '  profile:' "a runway tie never picks by order"
+
+for seconds in null '"unknown"' -1 0; do
+  jq --argjson seconds "$seconds" '(.providers[].quotaSemantics.effectiveAvailability[].runway.usableRunwaySeconds) = $seconds' "$RUNWAY_QUOTA" > "$TMP_ROOT/unknown-runway.json"
+  TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/unknown-runway.json" run code out err "$BRIEF"
+  assert_contains "$out" '  reason: no rankable eligible candidate' "missing or invalid runway is not healthy"
+done
+jq '(.providers[].quotaSemantics.effectiveAvailability[].runway.status) = "unknown"' "$RUNWAY_QUOTA" > "$TMP_ROOT/unknown-runway.json"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/unknown-runway.json" run code out err "$BRIEF"
+assert_contains "$out" '  reason: no rankable eligible candidate' "unknown runway with numeric priority is not healthy"
+
+jq '(.providers[] | select(.provider == "codex") | .quotaSemantics.effectiveAvailability) += [
+  {"scope": "model:gpt-5.6-sol", "status": "known", "effectivePercentRemaining": 90,
+   "selection": {"spendPriority": -2}, "runway": {"status": "through_reset"}}
+]' "$RUNWAY_QUOTA" > "$TMP_ROOT/runway-bound.json"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/runway-bound.json" run code out err "$BRIEF"
+assert_contains "$out" "  profile: --harness 'codex'" "a through-reset priority bound does not hide the account runway"
+assert_contains "$out" '  ranking: usableRunwaySeconds=275618' "candidate runway combines every applicable bound"
+jq '(.providers[] | select(.provider == "codex") | .quotaSemantics.effectiveAvailability) += [
+  {"scope": "model:gpt-5.6-sol", "status": "known", "effectivePercentRemaining": 90,
+   "selection": {"spendPriority": -2},
+   "runway": {"status": "projected_exhaustion", "usableRunwaySeconds": 10000}}
+]' "$RUNWAY_QUOTA" > "$TMP_ROOT/runway-shortest-bound.json"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/runway-shortest-bound.json" run code out err "$BRIEF"
+assert_contains "$out" "  profile: --harness 'claude'" "the shortest applicable projected bound controls candidate runway"
+
+cp "$BASE_RULES" "$RULES"
+pass "runway ranking preserves reset preference, confidence safety, unknowns, ties, and all applicable bounds"
+
 # --- default choice ------------------------------------------------------------
 reset_log
 write_response "$RESPONSE" default 0.88
@@ -804,7 +876,8 @@ pass "default: no rule matched resolves among the default profiles"
 # --- genuine tie escalates ---------------------------------------------------------
 reset_log
 TIE="$TMP_ROOT/tie.json"
-write_quota "$TIE" 0.5 0.5
+write_quota "$TMP_ROOT/tie-base.json" 0.5 0.5
+jq '(.providers[].quotaSemantics.effectiveAvailability[] | .runway.status) = "through_reset"' "$TMP_ROOT/tie-base.json" > "$TIE"
 write_response "$RESPONSE" default 0.88
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TIE" run code out err "$BRIEF"
 assert_contains "$out" '  status: escalate' "tie escalates"
@@ -852,9 +925,9 @@ cat > "$SCHEMA6" <<'JSON'
     { "provider": "codex", "accountKey": "openai-codex", "quotaSemantics": { "status": "known", "effectiveAvailability": [
       { "scope": "all_models", "status": "known", "effectivePercentRemaining": 0, "runway": { "status": "exhausted_now" }, "selection": { "spendPriority": -1.4788 } } ] } },
     { "provider": "codex", "accountKey": "openai-codex-work", "quotaSemantics": { "status": "known", "effectiveAvailability": [
-      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 11, "runway": { "status": "projected_exhaustion" }, "selection": { "spendPriority": -5.6819 } } ] } },
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 11, "runway": { "status": "projected_exhaustion", "usableRunwaySeconds": 100000 }, "selection": { "spendPriority": -5.6819 } } ] } },
     { "provider": "cursor", "accountKey": "default", "quotaSemantics": { "status": "known", "effectiveAvailability": [
-      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 24, "runway": { "status": "projected_exhaustion" }, "selection": { "spendPriority": 0.3917 } } ] } }
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 24, "runway": { "status": "projected_exhaustion", "usableRunwaySeconds": 100000 }, "selection": { "spendPriority": 0.3917 } } ] } }
   ]
 }
 JSON
@@ -909,7 +982,7 @@ jq '.schemaVersion = 5 | .providers |= map(select(.accountKey != "openai-codex")
 reset_log
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA5_PAIR" run code out err "$BRIEF"
 assert_contains "$out" '  status: escalate' "schema 5 keeps joining by provider alone"
-assert_contains "$out" '  reason: genuine spendPriority tie' "every codex profile reads the one schema 5 codex row"
+assert_contains "$out" '  reason: genuine usableRunwaySeconds tie' "every codex profile reads the one schema 5 codex row"
 assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=11%  spendPriority=-5.6819  runway=projected_exhaustion  -> eligible' "a schema 5 row never needs accountKey"
 
 SCHEMA6_PI_NATIVE="$TMP_ROOT/schema6-pi-native.json"

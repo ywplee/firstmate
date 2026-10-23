@@ -39,7 +39,7 @@ Start each intake by running `quota-axi` once with no `--json`, and reuse that T
 Post-consolidation quota-axi (the floor owned by `bin/fm-quota-axi-lib.sh`) puts `spendPriority` in the default `quota[]` block beside `effectivePercentRemaining`, `runway`, `confidence`, `limitedBy`, and `resetsAt`.
 Sparse `exhaustion[]` carries finite-runway seconds only for `projected_exhaustion` and `exhausted_now`.
 Sparse `attention[]` names auth, stale, and unmeasurable facts.
-`spendPriority` is THE quota-perspective ranker.
+`spendPriority` ranks candidates that run through reset; finite usable runway ranks candidates that all project exhaustion.
 It already computes the economics that older instructions reconstructed by hand from headroom, pace, reserve, and window-id lists; do not recompute those.
 Do not read `--json` on the normal path, and do not reach for `--full` to rebuild that economics.
 
@@ -52,10 +52,10 @@ Read `quota-axi auth --json` only when a candidate's credential surface is in qu
 
 For each candidate, preserve explicit `harness`, `model`, and `provider`; `harness-adapters` owns identity, and model/provider never infer harness.
 
-## Three gates, then spendPriority
+## Three gates, then quota ranking
 
 Apply the three cheap orthogonal gates first.
-`spendPriority` ranks only among candidates that pass all three.
+Quota ranking applies only among candidates that pass all three.
 It cannot override a hard-gate failure, and it is never hidden inside a new composite score.
 
 ### 1. Eligibility
@@ -106,9 +106,15 @@ A high `spendPriority` on a nearly empty window that will exhaust soon must not 
 Unknown or unmeasurable runway stays eligible with disclosed uncertainty and is never assumed to pass.
 Do not invent a generic percentage floor, and honor an explicit captain floor for a candidate when one exists.
 
-## Rank by spendPriority
+## Rank by runway, then spendPriority
 
-Among candidates that pass all three gates, pick the highest known `spendPriority`.
+Among candidates that pass all three gates, prefer known `through_reset` runway over `projected_exhaustion`.
+When any candidate runs through reset, pick the highest known `spendPriority` among those candidates.
+When all known-runway candidates project exhaustion, pick the longest positive numeric `usableRunwaySeconds`, taking the shortest applicable bound for each candidate.
+An absent, unknown, nonnumeric, zero, or negative projected runway is unrankable uncertainty, never healthy runway.
+An `early` projection confidence does not let a deciding `spendPriority` override a runway difference; this ordering applies regardless of confidence, without inventing a confidence multiplier.
+Equal longest finite runways are genuine ties; do not use pace-derived `spendPriority` to break them.
+Unknown runway stays eligible with disclosed uncertainty, and known viable evidence wins when otherwise comparable.
 A higher known scalar is better: positive means paid allowance is on track to reach reset unused, `0` is exact utilization, and negative means overdrawn against the reset clock.
 Rank only from comparable known scalars.
 Never treat absent, `unknown`, or unmeasurable `spendPriority` as zero or as healthy; `0` means exact utilization, a different claim from unknown.
@@ -118,7 +124,7 @@ After the permitted TOON-to-JSON fallback, escalate to Firstmate instead of rout
 Never resolve that terminal uncertainty by treating unknown as healthy or by choosing arbitrarily.
 Show the scalar or the literal `unknown` in the rationale; do not hide it in a score.
 
-Do not compare headroom against runway by hand.
+Do not substitute percent remaining for usable runway.
 Do not use pace or signed reserve as a later tie-break layer.
 Do not read `aheadWindowIds`, `behindWindowIds`, `onPaceWindowIds`, `limitingWindowIds`, or other window-id lists to reconstruct what `spendPriority` already computed.
 
