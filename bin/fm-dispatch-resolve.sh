@@ -65,6 +65,15 @@
 #   FM_DISPATCH_PROVIDER, FM_DISPATCH_MODEL, TYPESAFE_API_KEY, and
 #   OPENROUTER_API_KEY are read from the environment or $FM_HOME/.env.
 #
+# Weekly ranking, opt-in: FM_DISPATCH_RANK=weekly (environment or $FM_HOME/.env,
+#   environment wins) ranks eligible candidates by their weekly/7-day window's
+#   percentRemaining (Claude seven_day, Codex weekly) from the same snapshot,
+#   highest wins, instead of spendPriority. A candidate whose 5-hour/session
+#   window has FM_DISPATCH_SESSION_MIN_PERCENT (default 10) or less remaining
+#   is unranked and cannot win on weekly headroom. A candidate with no
+#   readable weekly window is unranked and disclosed. Absent, ranking is
+#   unchanged. Any other value is an error.
+#
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one
 #   inspectable answer plus every candidate's evidence, in code.
@@ -157,6 +166,19 @@ case "$DISPATCH_PROVIDER" in
     fi
     ;;
   *) die "unknown FM_DISPATCH_PROVIDER: $DISPATCH_PROVIDER (expected typesafe or openrouter)" ;;
+esac
+
+RANK_MODE=${FM_DISPATCH_RANK:-}
+[ -n "$RANK_MODE" ] || RANK_MODE=$(fmx_env_get FM_DISPATCH_RANK "$FM_HOME/.env")
+case "$RANK_MODE" in
+  ''|weekly) ;;
+  *) die "unknown FM_DISPATCH_RANK: $RANK_MODE (expected weekly or absent)" ;;
+esac
+SESSION_MIN=${FM_DISPATCH_SESSION_MIN_PERCENT:-}
+[ -n "$SESSION_MIN" ] || SESSION_MIN=$(fmx_env_get FM_DISPATCH_SESSION_MIN_PERCENT "$FM_HOME/.env")
+[ -n "$SESSION_MIN" ] || SESSION_MIN=10
+case "$SESSION_MIN" in
+  ''|*[!0-9]*) die "FM_DISPATCH_SESSION_MIN_PERCENT must be a whole number: $SESSION_MIN" ;;
 esac
 
 # ---- inputs --------------------------------------------------------------------
@@ -393,6 +415,7 @@ fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an inval
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
 RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
+  --arg rank_mode "$RANK_MODE" --argjson session_min "$SESSION_MIN" \
   --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" "$FM_QUOTA_ROW_JQ"'
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0]) as $q | ($r.answers.rule) as $a |
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
@@ -418,6 +441,10 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
         else "ok"
         end
     end;
+  def weekly_mode: $rank_mode == "weekly";
+  def window_of($p; $lane; $kind):
+    ([prov($p; $lane).windows[]? | select(.kind == $kind)] | first) // null;
+  def pct_ok($w): $w != null and ($w.percentRemaining | type) == "number";
   def evidence($rows):
     $rows | map({scope, status, pct: (.effectivePercentRemaining // null), runway: (.runway.status // null), spendPriority: (.selection.spendPriority // null)});
   def evaluate($c):
@@ -455,19 +482,30 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
       elif any($rows[]; .status != "known") then
         ($rows | map(select(.status != "known")) | first) as $bad |
         {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, eligible: true, unranked: true, unknown: true, reason: "quota row \($bad.scope) unknown: not rankable"}
-      elif any($rows[]; (.selection.spendPriority | type) != "number") then
+      elif weekly_mode and (pct_ok(window_of($p; $lane; "weekly")) | not) then
+        {profile: $c, provider: $p, bounds: $bounds, eligible: true, unranked: true, unknown: true,
+         reason: "weekly window data missing or unreadable: not rankable"}
+      elif weekly_mode and pct_ok(window_of($p; $lane; "session")) and window_of($p; $lane; "session").percentRemaining <= $session_min then
+        (window_of($p; $lane; "weekly")) as $wk |
+        {profile: $c, provider: $p, bounds: $bounds, weeklyPct: $wk.percentRemaining, weeklyResetsAt: ($wk.resetsAt // null),
+         eligible: true, unranked: true,
+         reason: "5-hour window near exhaustion (\(window_of($p; $lane; "session").percentRemaining)% <= \($session_min)%): cannot win on weekly headroom"}
+      elif (weekly_mode | not) and any($rows[]; (.selection.spendPriority | type) != "number") then
         ($rows | map(select((.selection.spendPriority | type) != "number")) | first) as $bad |
         {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: $bad.effectivePercentRemaining, runway: $bad.runway.status, eligible: true, unranked: true, reason: "spendPriority missing or non-numeric at \($bad.scope): not rankable"}
-      elif any($rows[]; .runway.status == "unknown" or
+      elif (weekly_mode | not) and any($rows[]; .runway.status == "unknown" or
         (.runway.status == "projected_exhaustion" and
          ((.runway.usableRunwaySeconds | type) != "number" or .runway.usableRunwaySeconds <= 0))) then
         {profile: $c, provider: $p, bounds: $bounds, eligible: true, unranked: true,
          reason: "usable runway unknown or invalid: not rankable"}
       else
-        ($rows | min_by(.selection.spendPriority)) as $limiting |
+        (window_of($p; $lane; "weekly")) as $wk |
+        ($rows | min_by(.selection.spendPriority // 0)) as $limiting |
         ([$rows[] | select(.runway.status == "projected_exhaustion") | .runway.usableRunwaySeconds] | min) as $seconds |
         {profile: $c, provider: $p, bounds: $bounds, scope: $limiting.scope, pct: $limiting.effectivePercentRemaining,
          spendPriority: $limiting.selection.spendPriority,
+         weeklyPct: (if weekly_mode then $wk.percentRemaining else null end),
+         weeklyResetsAt: (if weekly_mode then ($wk.resetsAt // null) else null end),
          runway: (if $seconds != null then "projected_exhaustion" else "through_reset" end),
          usableRunwaySeconds: $seconds, eligible: true, reason: "ok"}
       end
@@ -534,8 +572,8 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     if ($elig | length) == 0 then $ev + {status: "escalate", reason: "no rankable eligible candidate", note: $sel.note, candidates: $cands}
     else
       ([$elig[] | select(.runway == "through_reset")]) as $through_reset |
-      (if ($through_reset | length) > 0 then "spendPriority" else "usableRunwaySeconds" end) as $ranker |
-      (if ($through_reset | length) > 0 then $through_reset else $elig end) as $ranked |
+      (if weekly_mode then "weeklyPct" elif ($through_reset | length) > 0 then "spendPriority" else "usableRunwaySeconds" end) as $ranker |
+      (if weekly_mode then $elig elif ($through_reset | length) > 0 then $through_reset else $elig end) as $ranked |
       ($ranked | max_by(.[$ranker])) as $best |
       ([$ranked[] | select(.[$ranker] == $best[$ranker])] | length) as $ties |
       if $ties > 1 then $ev + {status: "escalate", reason: "genuine \($ranker) tie", note: $sel.note, candidates: $cands}
@@ -559,11 +597,12 @@ TEXT=$(jq -r '
   (if .fallback then "  fallback: \(.fallback | flat)" else empty end),
   (if .reason then "  reason: \(.reason | flat)" else empty end),
   (if .note then "  note: \(.note | flat)" else empty end),
-  (if .chosen then "  ranking: \(if .chosen.runway == "through_reset" then "through_reset, then spendPriority" else "usableRunwaySeconds=\(.chosen.usableRunwaySeconds)" end)" else empty end),
+  (if .chosen then "  ranking: \(if .chosen.weeklyPct != null then "weekly window remaining" elif .chosen.runway == "through_reset" then "through_reset, then spendPriority" else "usableRunwaySeconds=\(.chosen.usableRunwaySeconds)" end)" else empty end),
   (if .unranked_note then "  note: \(.unranked_note | flat)" else empty end),
   (.candidates[]? | "  candidate: \(.profile.harness | flat):\(show(.profile.model))"
       + (if .provider then "  provider=\(.provider | flat)" else "" end)
       + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))  runway=\(show(.runway))" else "" end)
+      + (if .weeklyPct != null then "  weekly=\(show(.weeklyPct))%  weeklyResets=\(show(.weeklyResetsAt))" else "" end)
       + (if (.bounds // [] | length) > 1 then "  bounds=" + ([.bounds[] | "\(.scope | flat):\(show(.pct))%/\((.runway // .status) | flat)"] | join(",")) else "" end)
       + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat): disclosed uncertainty" elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end)),
   (if .chosen then "  profile: --harness \(.chosen.profile.harness | shell_arg)"

@@ -101,7 +101,7 @@ PREFIX_SHA=$(sha 'alpha\nbeta\n')
 run_reader 11 "$PREFIX_SHA" 4 > "$TMP_ROOT/truncated.out" &
 READER_PID=$!
 sleep 0.3
-printf 'a\n' > "$DELTA_HOME/$DELTA_LOG_REL"
+printf 'a\n' | dd of="$DELTA_HOME/$DELTA_LOG_REL" conv=notrunc 2>/dev/null && truncate -s 2 "$DELTA_HOME/$DELTA_LOG_REL"
 wait "$READER_PID" || fail 'the truncated read did not exit 0'
 OUT=$(<"$TMP_ROOT/truncated.out")
 assert_contains "$OUT" 'status=continuity-broken' 'truncation did not produce a break'

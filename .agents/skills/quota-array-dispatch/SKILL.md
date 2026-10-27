@@ -40,6 +40,7 @@ Post-consolidation quota-axi (the floor owned by `bin/fm-quota-axi-lib.sh`) puts
 Sparse `exhaustion[]` carries finite-runway seconds only for `projected_exhaustion` and `exhausted_now`.
 Sparse `attention[]` names auth, stale, and unmeasurable facts.
 `spendPriority` ranks candidates that run through reset; finite usable runway ranks candidates that all project exhaustion.
+When `FM_DISPATCH_RANK=weekly` is set, the typed resolver instead ranks by each provider's weekly window remaining (`docs/configuration.md` "Typed dispatch resolution" owns the contract); hand selection here still uses `spendPriority`.
 It already computes the economics that older instructions reconstructed by hand from headroom, pace, reserve, and window-id lists; do not recompute those.
 Do not read `--json` on the normal path, and do not reach for `--full` to rebuild that economics.
 
