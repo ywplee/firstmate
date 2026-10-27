@@ -1160,4 +1160,74 @@ expect_code 0 "$code" "--help exits 0"
 assert_contains "$out" 'Usage:' "--help prints usage"
 pass "configuration errors exit 2 before any network call"
 
+# --- opt-in weekly ranking (FM_DISPATCH_RANK=weekly) --------------------------
+write_weekly_quota() {  # <path> <claude weekly%> <claude session%|none> <codex weekly%|none>
+  local path=$1 cw=$2 cs=$3 xw=$4 sess='' codexwin=''
+  [ "$cs" = none ] || sess=", { \"id\": \"five_hour\", \"kind\": \"session\", \"percentRemaining\": $cs, \"resetsAt\": \"2030-01-01T05:00:00Z\" }"
+  [ "$xw" = none ] || codexwin="{ \"id\": \"weekly\", \"kind\": \"weekly\", \"percentRemaining\": $xw, \"resetsAt\": \"2030-01-07T00:00:00Z\" }"
+  cat > "$path" <<JSON
+{ "generatedAt": "2030-01-01T00:00:00Z", "schemaVersion": 5, "providers": [
+  { "provider": "claude", "state": { "status": "fresh" },
+    "windows": [ { "id": "seven_day", "kind": "weekly", "percentRemaining": $cw, "resetsAt": "2030-01-02T00:00:00Z" }$sess ],
+    "quotaSemantics": { "status": "known", "effectiveAvailability": [
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": $cw, "runway": { "status": "through_reset" }, "selection": { "spendPriority": 0.9 } } ] } },
+  { "provider": "codex", "state": { "status": "fresh" },
+    "windows": [ $codexwin ],
+    "quotaSemantics": { "status": "known", "effectiveAvailability": [
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 50, "runway": { "status": "through_reset" }, "selection": { "spendPriority": 0.1 } } ] } }
+] }
+JSON
+}
+cat > "$RULES" <<'JSON'
+{ "rules": [ { "when": "Any coding task.", "use": [
+  { "harness": "claude", "model": "opus" },
+  { "harness": "codex", "model": "gpt-5.6-sol" } ] } ] }
+JSON
+cat > "$RESPONSE" <<'JSON'
+{ "model": "jev-1.13.0", "answers": { "rule": { "type": "choice", "choice": "rule_1", "confidence": 0.95,
+  "probabilities": { "rule_1": 0.97, "default": 0.03 } } }, "usage": { "input_tokens": 100, "output_tokens": 10 } }
+JSON
+export TYPESAFE_API_KEY=$KEY
+
+weekly_run() {  # <rank-mode|''> -> code/out/err
+  if [ -n "$1" ]; then FM_DISPATCH_RANK=$1 run code out err "$BRIEF"; else run code out err "$BRIEF"; fi
+}
+
+reset_log; write_weekly_quota "$QUOTA" 20 90 80
+weekly_run ''
+case $out in *weekly=*) fail "weekly evidence must not print when the option is off" ;; esac
+assert_contains "$out" "profile: --harness 'claude'" "weekly option off still ranks claude first on spendPriority"
+pass "weekly option off is unchanged"
+
+weekly_run weekly
+expect_code 0 "$code" "weekly ranking exits 0"
+assert_contains "$out" "profile: --harness 'codex'" "weekly ranking picks the provider with more weekly headroom"
+assert_contains "$out" 'weekly=80%' "weekly remaining is printed"
+assert_contains "$out" 'weeklyResets=2030-01-07T00:00:00Z' "weekly reset is printed"
+pass "weekly ranking picks the higher weekly remaining"
+
+write_weekly_quota "$QUOTA" 95 5 80
+weekly_run weekly
+assert_contains "$out" "profile: --harness 'codex'" "near-exhausted 5-hour window blocks a weekly win"
+assert_contains "$out" '5-hour window near exhaustion' "session block is disclosed"
+FM_DISPATCH_SESSION_MIN_PERCENT=3 weekly_run weekly
+assert_contains "$out" "profile: --harness 'claude'" "a lower session threshold lets weekly headroom win"
+pass "near-exhausted 5-hour window blocks a weekly win"
+
+write_weekly_quota "$QUOTA" 20 90 none
+weekly_run weekly
+assert_contains "$out" "profile: --harness 'claude'" "candidate with weekly data wins over one without"
+assert_contains "$out" 'weekly window data missing or unreadable' "missing weekly data is disclosed"
+write_weekly_quota "$QUOTA" 20 90 none
+jq '(.providers[] | select(.provider == "claude")).windows = []' "$QUOTA" > "$QUOTA.tmp" && mv "$QUOTA.tmp" "$QUOTA"
+weekly_run weekly
+case $out in *'status: clear'*) fail "no candidate with weekly data must not be chosen" ;; esac
+assert_contains "$out" 'status: escalate' "all-missing weekly data escalates"
+FM_DISPATCH_RANK=bogus run code out err "$BRIEF"
+expect_code 2 "$code" "unknown rank mode exits 2"
+pass "missing weekly data is never ranked first"
+unset TYPESAFE_API_KEY
+cp "$BASE_RULES" "$RULES"
+write_quota "$QUOTA" 0.7597
+
 printf '# all fm-dispatch-resolve tests passed\n'

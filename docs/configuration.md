@@ -1506,6 +1506,10 @@ With no provider setting, the original typesafe.ai behavior is unchanged: `jev-l
 Explicit `FM_DISPATCH_PROVIDER=typesafe` also uses `jev-latest` when no model is set.
 The selected provider's key must be non-empty in the environment or `.env`, with the environment taking precedence.
 
+`FM_DISPATCH_RANK=weekly` (environment or `.env`, optional) ranks eligible candidates by their weekly window's remaining percent instead of `spendPriority`: Claude `seven_day`, Codex `weekly`, read from the same `quota-axi --json` snapshot, highest wins, with the weekly percent and reset printed on each candidate line.
+A candidate whose 5-hour session window has `FM_DISPATCH_SESSION_MIN_PERCENT` (default 10) or less remaining, or whose weekly window is missing or unreadable, is disclosed and left unranked, so it never wins on that basis.
+Absent, ranking is unchanged; any other value is a configuration error.
+
 Off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
 This section is the single owner of the tool's operator contract; the script header owns its exact flags and output lines, and "Crew dispatch profiles" above owns the declared rule and profile fields it applies.
 
@@ -2778,6 +2782,7 @@ FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
 FM_DISPATCH_PROVIDER=   # typesafe or openrouter; absent preserves the original typesafe key gate ("Typed dispatch resolution")
 FM_DISPATCH_MODEL=      # explicit model for the selected provider; required for openrouter
+FM_DISPATCH_RANK=       # weekly ranks dispatch candidates by weekly/7-day remaining ("Typed dispatch resolution"); absent keeps spendPriority
 TYPESAFE_API_KEY=       # typesafe dispatch key, from the environment or .env
 OPENROUTER_API_KEY=     # OpenRouter dispatch key, from the environment or .env
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
