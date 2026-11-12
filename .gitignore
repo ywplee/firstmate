@@ -12,5 +12,6 @@ __pycache__/
 .env
 .claude/settings.local.json
 config/
+.claude/settings.local.json
 
 .tools/
