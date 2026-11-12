@@ -36,6 +36,9 @@
 #
 # Stdin mode extracts .tool_name for Claude and Codex, or .toolName for Grok.
 # CLI mode is for adapters that already hold the tool name (OpenCode, Pi).
+# Stdin mode also reads .tool_input.action, which CLI mode cannot carry, so the
+# RemoteTrigger read-only allowance (READ_ONLY_ACTION_TOOL below) exists only on
+# the stdin transport and the tool stays denied through --tool.
 #
 # Exit/output contract (identical shape to bin/fm-cd-pretool-check.sh):
 #   ALLOW - exit 0 and no output.
@@ -78,7 +81,20 @@ OBSERVE_ONLY_TOOLS='taskoutput taskstop taskget tasklist cronlist bashoutput kil
 # widen by accident.
 PLAN_ONLY_TOOLS='taskcreate taskupdate'
 
+# One exact lowercase tool name whose verdict depends on the action it is asked
+# to perform rather than on its name alone. RemoteTrigger both reads routines
+# and creates, changes, and runs them, so the name cannot be allowed outright:
+# it is allowed only when the payload's .tool_input.action is a string exactly
+# equal to one of READ_ONLY_ACTIONS, which list or fetch routines, their runs,
+# and a run's log without creating or starting anything. Every other action, a
+# missing or non-string action, an unreadable tool_input, and the action-less
+# --tool transport fall through to the stem match and stay denied. Actions are
+# compared verbatim, never normalized, so a near-miss spelling cannot widen it.
+READ_ONLY_ACTION_TOOL='remotetrigger'
+READ_ONLY_ACTIONS='list get list_runs get_run_log'
+
 TOOL=""
+ACTION=""
 TOOL_SET=0
 CLAUDE_MODE=0
 
@@ -138,6 +154,7 @@ if [ "$TOOL_SET" -eq 0 ]; then
   [ -n "$PAYLOAD" ] || exit 0
   command -v jq >/dev/null 2>&1 || exit 0
   TOOL=$(printf '%s' "$PAYLOAD" | jq -r '(.tool_name // .toolName // empty)' 2>/dev/null) || exit 0
+  ACTION=$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.action | if type == "string" then . else empty end' 2>/dev/null) || ACTION=""
 fi
 
 [ -n "$TOOL" ] || exit 0
@@ -155,6 +172,12 @@ esac
 for allowed in $OBSERVE_ONLY_TOOLS $PLAN_ONLY_TOOLS; do
   [ "$NORMALIZED" != "$allowed" ] || exit 0
 done
+
+if [ "$NORMALIZED" = "$READ_ONLY_ACTION_TOOL" ] && [ -n "$ACTION" ]; then
+  for allowed in $READ_ONLY_ACTIONS; do
+    [ "$ACTION" != "$allowed" ] || exit 0
+  done
+fi
 
 MATCHED=""
 for stem in $DELEGATION_STEMS; do

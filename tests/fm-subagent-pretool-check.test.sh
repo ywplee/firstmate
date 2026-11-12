@@ -245,6 +245,68 @@ test_stdin_transports_and_output_shapes() {
   pass "both stdin transports classify correctly and Claude's deny keeps stdout empty"
 }
 
+run_remote_trigger_payload() {
+  local payload=$1 rc=0
+  : > "$OUT"; : > "$ERR"
+  printf '%s' "$payload" \
+    | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+      "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
+  return "$rc"
+}
+
+test_remote_trigger_allows_only_read_only_actions() {
+  local action payload rc
+  for action in list get list_runs get_run_log; do
+    rc=0
+    run_remote_trigger_payload "{\"tool_name\":\"RemoteTrigger\",\"tool_input\":{\"action\":\"$action\",\"trigger_id\":\"t1\"}}" || rc=$?
+    [ "$rc" -eq 0 ] || fail "RemoteTrigger action $action must allow, got exit $rc: $(cat "$ERR")"
+    [ ! -s "$OUT" ] && [ ! -s "$ERR" ] || fail "RemoteTrigger action $action allow wrote output"
+  done
+  pass "RemoteTrigger is allowed for exactly the list, get, list_runs, and get_run_log actions"
+
+  for action in create update run delete List GET list_run get_run_logs 'list ' listruns; do
+    rc=0
+    run_remote_trigger_payload "{\"tool_name\":\"RemoteTrigger\",\"tool_input\":{\"action\":\"$action\"}}" || rc=$?
+    [ "$rc" -eq 2 ] || fail "RemoteTrigger action '$action' must deny with exit 2, got $rc"
+    [ ! -s "$OUT" ] || fail "RemoteTrigger action '$action' deny wrote stdout: $(cat "$OUT")"
+    jq -e '.systemMessage | contains("blocked tool: RemoteTrigger")' "$ERR" >/dev/null 2>&1 \
+      || fail "RemoteTrigger action '$action' deny lost its tool name: $(cat "$ERR")"
+  done
+  pass "RemoteTrigger create, update, run, and near-miss action spellings stay denied"
+
+  # A missing action, and every payload shape whose action cannot be read as a
+  # plain string, must stay denied rather than be taken for a read.
+  for payload in \
+    '{"tool_name":"RemoteTrigger"}' \
+    '{"tool_name":"RemoteTrigger","tool_input":{}}' \
+    '{"tool_name":"RemoteTrigger","tool_input":{"action":""}}' \
+    '{"tool_name":"RemoteTrigger","tool_input":{"action":null}}' \
+    '{"tool_name":"RemoteTrigger","tool_input":{"action":["list"]}}' \
+    '{"tool_name":"RemoteTrigger","tool_input":{"action":{"list":true}}}' \
+    '{"tool_name":"RemoteTrigger","tool_input":"list"}' \
+    '{"tool_name":"RemoteTrigger","tool_input":["list"]}' \
+    '{"tool_name":"RemoteTrigger","action":"list"}' \
+    '{"toolName":"RemoteTrigger","toolInput":{"action":"list"}}'; do
+    rc=0
+    run_remote_trigger_payload "$payload" || rc=$?
+    [ "$rc" -eq 2 ] || fail "RemoteTrigger payload without a readable action must deny, got $rc: $payload"
+  done
+  pass "RemoteTrigger with a missing or malformed action stays denied"
+
+  rc=0
+  run_tool RemoteTrigger || rc=$?
+  [ "$rc" -eq 2 ] || fail "RemoteTrigger through the action-less --tool transport must deny, got $rc"
+  for payload in \
+    '{"tool_name":"RemoteTriggerAgent","tool_input":{"action":"list"}}' \
+    '{"tool_name":"Agent","tool_input":{"action":"list"}}' \
+    '{"tool_name":"CronCreate","tool_input":{"action":"get"}}'; do
+    rc=0
+    run_remote_trigger_payload "$payload" || rc=$?
+    [ "$rc" -eq 2 ] || fail "a read-only action must not release another tool, got $rc: $payload"
+  done
+  pass "the read-only action allowance is bound to the exact RemoteTrigger name and the stdin transport"
+}
+
 test_malformed_transport_fails_open() {
   local rc payload
   for payload in '{not-json' '' '{}' '{"tool_name":null}'; do
@@ -287,5 +349,6 @@ test_escape_hatch_allows_deliberate_use
 test_task_worktree_and_non_firstmate_repo_are_inert
 test_secondmate_home_is_in_scope
 test_stdin_transports_and_output_shapes
+test_remote_trigger_allows_only_read_only_actions
 test_malformed_transport_fails_open
 test_missing_jq_stdin_transport_fails_open
