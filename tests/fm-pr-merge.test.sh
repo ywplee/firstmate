@@ -302,7 +302,10 @@ case "${1:-} ${2:-}" in
     # the merge-queue filter the queue reader below applies.
     actions_dir="$(dirname "$FM_TEST_GH_VIEW_JSON")/github-actions"
     view_current="$(dirname "$FM_TEST_GH_VIEW_JSON")/github-view-current.json"
-    head=$(cat "$FM_TEST_GH_HEAD")
+    # Actions results are served for the head the last view reported, which
+    # trails the branch head while an update is not yet visible.
+    head=$(jq -r '.headRefOid // empty' "$view_current" 2>/dev/null) || head=
+    [ -n "$head" ] || head=$(cat "$FM_TEST_GH_HEAD")
     case " $* " in
       *" repos/"*"/pulls/"*"/update-branch "*)
         [ "${2:-}" = --method ] && [ "${3:-}" = PUT ] || exit 2
